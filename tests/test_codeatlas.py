@@ -161,6 +161,12 @@ def test_rank_and_repo_map(atlas: Atlas):
     assert rank.estimate_tokens(m) <= 900
     focused = rank.repo_map(atlas.ix, token_budget=400, focus_paths=["svc"])
     assert "svc/main.go" in focused.split("\n")[1]
+    # no budget -> the complete map: every indexed file and every symbol, nothing truncated
+    full = rank.repo_map(atlas.ix)
+    n_files = atlas.ix.conn.execute("SELECT COUNT(*) FROM files WHERE id IN (SELECT file_id FROM symbols)").fetchone()[0]
+    n_syms = atlas.ix.conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    assert "complete" in full.split("\n")[0] and f"{n_files}/{n_files} files shown" in full and "truncated" not in full
+    assert sum(1 for line in full.split("\n") if line.rstrip().endswith("]")) == n_syms
 
 
 def test_unreferenced_and_hotspots(atlas: Atlas):

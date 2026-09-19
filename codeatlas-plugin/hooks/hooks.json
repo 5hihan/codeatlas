@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Glob|Bash|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "codeatlas hook pretool --prefix mcp__plugin_codeatlas_atlas",
+            "timeout": 10,
+            "continueOnBlock": true
+          }
+        ]
+      }
+    ]
+  }
+}

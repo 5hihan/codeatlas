@@ -8,6 +8,7 @@
   codeatlas snipe [board|scan|next|md|report FILE]   the SNIPE loop from the shell
   codeatlas dashboard [--open]          run only the dashboard
   codeatlas doctor                      check installation
+  codeatlas hook pretool                Claude Code PreToolUse guard: Grep/Glob/grep -> CodeAtlas tools (used by the plugin)
 """
 from __future__ import annotations
 
@@ -489,6 +490,11 @@ def cmd_init(args) -> None:
              "\nTip: `codeatlas init --global` once makes every project work without this step (Claude Code plugin + Codex)."))
 
 
+def cmd_hook(args) -> None:
+    from .hook import run
+    sys.exit(run(args.hook_args))
+
+
 def cmd_doctor(args) -> None:
     ok = True
     print(f"codeatlas {__version__} / python {sys.version.split()[0]}")
@@ -596,6 +602,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     p.add_argument("action", nargs="?", default="export", choices=["export"])
     p.add_argument("dir", nargs="?", default="codeatlas-plugin", help="target directory (default ./codeatlas-plugin)")
     add("doctor", cmd_doctor, help="check the installation")
+    p = sub.add_parser("hook", help="Claude Code hook runner (PreToolUse guard that redirects Grep/Glob/grep to CodeAtlas)")
+    p.add_argument("hook_args", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_hook)
 
     args = ap.parse_args(argv)
     if not args.cmd:

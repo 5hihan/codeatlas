@@ -58,7 +58,7 @@ codeatlas init        # seeds the index and SNIPE.md, writes agents + guidance, 
 
 | Platform | How | Then |
 |---|---|---|
-| **Claude Code** | plugin `codeatlas@codeatlas` installed at user scope by the installer (or `claude plugin marketplace add 5hihan/codeatlas` + `claude plugin install codeatlas@codeatlas`) | `/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to the `codeatlas-navigator`, `codeatlas-sniper`, `codeatlas-reviewer` agents |
+| **Claude Code** | plugin `codeatlas@codeatlas` installed at user scope by the installer (or `claude plugin marketplace add 5hihan/codeatlas` + `claude plugin install codeatlas@codeatlas`) | `/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to the `codeatlas-navigator`, `codeatlas-sniper`, `codeatlas-reviewer` agents. A PreToolUse hook makes Claude actually use the index: in an indexed repo, built-in `Grep`/`Glob` and `grep`/`rg`/`find` in Bash are denied with the CodeAtlas tool to call instead (`CODEATLAS_GUARD=off` disables, `=strict` also redirects whole-file `Read`) |
 | **Codex** | `mcp_servers.codeatlas` in `~/.codex/config.toml` + skill in `~/.agents/skills/codeatlas` | type `$codeatlas` (Codex uses `$`, not `/`); the MCP tools are available in every project |
 | **Cursor** | `codeatlas init cursor` writes `.cursor/mcp.json` in the repo | the MCP tools appear in the agent |
 | **Anything else (MCP)** | `codeatlas serve --repo <path>` over stdio | 36 tools, see below |
@@ -117,7 +117,7 @@ attributed to an unrelated repository symbol.
 | Tool | Gives the agent |
 |---|---|
 | `task_context` | **start here**: the symbols relevant to a task (BM25 + PageRank + graph proximity + pattern hints), source for the strongest ones, tests, config/docs, inside an adaptive token budget; each item says why it is there and how to expand it |
-| `repo_overview`, `repo_map` | languages, packages, hubs, entry points; a PageRank-ranked map that fits a budget |
+| `repo_overview`, `repo_map` | languages, packages, hubs, entry points; the complete symbol map, files ordered by PageRank (pass `token_budget` to get only the top-ranked part) |
 | `file_outline`, `find_symbols`, `symbol`, `symbol_source` | outlines with reference counts and pattern tags; signature, doc, callers, callees; just the lines of one symbol |
 | `references`, `impact`, `triggers`, `dependencies`, `module_graph` | who uses it, what breaks, what makes it run, import graphs |
 | `relationships` | code ↔ config ↔ schema: env keys read and declared, SQL tables declared and used, literal config paths |
@@ -179,6 +179,7 @@ codeatlas serve [--repo PATH] [--profile nav|edit|snipe|all]  MCP server + watch
 codeatlas context "<task>" | changes [--base REF] | map | overview | outline PATH | symbol NAME | impact NAME
 codeatlas snipe [board|scan [--run tests]|next|report FILE]  the loop from the shell
 codeatlas plugin export DIR | dashboard --open | open | doctor
+codeatlas hook pretool [--prefix P] [--mode default|strict|off]   Claude Code PreToolUse guard (shipped in the plugin)
 ```
 
 ## How it stays fast on large repos

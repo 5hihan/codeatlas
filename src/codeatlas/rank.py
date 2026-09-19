@@ -157,27 +157,36 @@ def estimate_tokens(text: str) -> int:
 
 def repo_map(ix: Index, token_budget: Optional[int] = None, focus_paths: Optional[Iterable[str]] = None,
              focus_names: Optional[Iterable[str]] = None, exported_only: bool = False) -> str:
-    """Render the most important symbols, grouped by file, within ``token_budget`` tokens.
+    """Render the symbols of the repository grouped by file, as a tree with signatures.
 
-    Selection: symbols are ordered by PageRank (boosted when they live in / are named by the focus
-    set), and files are included until the budget is exhausted; within a file, the top ranked
-    symbols are shown as a tree with signatures.
+    Without ``token_budget`` the map is complete: every indexed file and every symbol, files ordered by
+    importance (sum of PageRank, boosted when they live in / are named by the focus set). A partial map
+    silently hides the code an agent then fails to account for, so nothing is cut unless a budget is
+    given explicitly; with one, files are included in rank order until it is exhausted and only the top
+    ranked symbols of each file are shown.
     """
     ensure_rank(ix)
     c = ix.conn
     focus_paths = [ix.rel(p) for p in (focus_paths or [])]
     focus_names = set(focus_names or [])
-    from .budgeting import plan_context
-    plan = plan_context(ix, task=" ".join(sorted(focus_names)), requested_budget=token_budget,
-                        scope=focus_paths[0] if len(focus_paths) == 1 else None, mode="map")
-    budget = plan["budget"]
-    char_limit = max(1, int(budget * 3.6))
+    full = token_budget is None
+    if full:
+        budget = None
+        char_limit = None
+        policy = "complete"
+    else:
+        from .budgeting import plan_context
+        plan = plan_context(ix, task=" ".join(sorted(focus_names)), requested_budget=token_budget,
+                            scope=focus_paths[0] if len(focus_paths) == 1 else None, mode="map")
+        budget = plan["budget"]
+        char_limit = max(1, int(budget * 3.6))
+        policy = f"{plan['policy']} budget ~{budget} tokens"
     rows = c.execute(
         "SELECT s.id, s.name, s.kind, s.qualified, s.parent_id, s.start_line, s.end_line, s.signature, s.exported, "
         "f.path, COALESCE(r.rank, 0) AS rank, COALESCE(r.in_deg,0) AS in_deg FROM symbols s JOIN files f ON f.id=s.file_id "
         "LEFT JOIN symbol_rank r ON r.symbol_id=s.id" + (" WHERE s.exported=1" if exported_only else "")).fetchall()
     if not rows:
-        return "(index is empty - run index_repo first)"[:char_limit]
+        return "(index is empty - run index_repo first)"[:char_limit or None]
     # boost
     scored = []
     for r in rows:
@@ -198,15 +207,15 @@ def repo_map(ix: Index, token_budget: Optional[int] = None, focus_paths: Optiona
     ordered_files = sorted(per_file, key=lambda p: -file_score[p])
     lines: list[str] = []
     used = 0
-    header = (f"# Repo map ({len(rows)} symbols in {len(per_file)} files; showing top by PageRank; "
-              f"{plan['policy']} budget ~{budget} tokens)\n")
+    header = (f"# Repo map ({len(rows)} symbols in {len(per_file)} files; "
+              f"{'complete, files ordered by PageRank' if full else 'showing top by PageRank; ' + policy})\n")
     used += estimate_tokens(header)
     lines.append(header.rstrip("\n"))
     shown_files = 0
     for path in ordered_files:
         syms = per_file[path]
-        # how many symbols to show for this file: proportional to importance
-        k = max(3, min(24, int(2 + 30 * (file_score[path] / (file_score[ordered_files[0]] or 1)))))
+        # how many symbols to show for this file: all of them, or proportional to importance under a budget
+        k = len(syms) if full else max(3, min(24, int(2 + 30 * (file_score[path] / (file_score[ordered_files[0]] or 1)))))
         top = sorted(syms[:k], key=lambda x: x[1]["start_line"])
         # keep parents of shown children
         ids = {r["id"] for _, r in top}
@@ -226,7 +235,7 @@ def repo_map(ix: Index, token_budget: Optional[int] = None, focus_paths: Optiona
             block.append(f"{'  ' * depth}{'├─ ' if depth else ''}{sig}{star}  [{r['start_line']}]")
         text = "\n".join(block) + "\n"
         cost = estimate_tokens(text)
-        if used + cost > budget:
+        if budget is not None and used + cost > budget:
             if shown_files == 0:
                 # always show at least the first file, trimmed
                 block = block[: max(2, int(len(block) * (budget - used) / cost))]
@@ -239,7 +248,7 @@ def repo_map(ix: Index, token_budget: Optional[int] = None, focus_paths: Optiona
     lines.append(f"\n({shown_files}/{len(per_file)} files shown, ~{used} tokens; * = top-ranked. "
                  f"Use file_outline / symbol for details.)")
     answer = "\n".join(lines)
-    if len(answer) > char_limit:
+    if char_limit is not None and len(answer) > char_limit:
         suffix = "\n(truncated; increase token_budget or focus the map)"
         body = answer[:max(0, char_limit - len(suffix))].rsplit("\n", 1)[0]
         answer = (body + suffix)[:char_limit]

@@ -187,6 +187,20 @@ def write_project_agents(repo: Path) -> list[str]:
     return out
 
 
+def plugin_hooks(prefix: str) -> dict:
+    """Claude Code hooks: a PreToolUse guard that denies built-in text search when the repo is indexed.
+
+    Advice in CLAUDE.md is not enough: Grep/Glob schemas are always loaded while MCP tools are deferred, so the
+    model reaches for Grep by default. The guard (``codeatlas hook pretool``) turns the advice into a rule and its
+    deny reason names the CodeAtlas tool to call instead, so the model recovers in the same turn.
+    """
+    return {"hooks": {"PreToolUse": [{
+        "matcher": "Grep|Glob|Bash|Read",
+        "hooks": [{"type": "command", "command": f"codeatlas hook pretool --prefix {prefix}",
+                   "timeout": 10, "continueOnBlock": True}],
+    }]}}
+
+
 def write_plugin(target: Path) -> list[str]:
     """Materialise the plugin directory (load it with `claude --plugin-dir DIR` or install from git)."""
     out = []
@@ -206,10 +220,16 @@ def write_plugin(target: Path) -> list[str]:
         ".mcp.json": json.dumps({"mcpServers": {"atlas": {
             "command": "codeatlas", "args": ["serve", "--repo", "${CLAUDE_PROJECT_DIR}"]}}}, indent=2) + "\n",
         "skills/codeatlas/SKILL.md": SKILL,
+        "hooks/hooks.json": json.dumps(plugin_hooks(PLUGIN_PREFIX), indent=2) + "\n",
         "README.md": ("# CodeAtlas plugin for Claude Code\n\nRequires the `codeatlas` command on PATH "
                       "(`uv tool install codeatlas`). Load with `claude --plugin-dir <this dir>` or install it, then use\n"
                       "`/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to\n"
-                      "the `codeatlas-navigator`, `codeatlas-sniper` and `codeatlas-reviewer` agents.\n"),
+                      "the `codeatlas-navigator`, `codeatlas-sniper` and `codeatlas-reviewer` agents.\n\n"
+                      "`hooks/hooks.json` installs a PreToolUse guard: in a repository that has a `.codeatlas/index.db`, "
+                      "the built-in\nGrep and Glob tools and `grep`/`rg`/`find` run through Bash are denied with a message "
+                      "naming the CodeAtlas tool to\nuse instead (`grep`, `find_symbols`, `references`, `list_files`). "
+                      "Set `CODEATLAS_GUARD=off` to disable it, or\n`CODEATLAS_GUARD=strict` to also redirect whole-file "
+                      "Read of indexed source files to `file_outline` / `symbol_source`.\n"),
     }
     for name, text in agent_files(PLUGIN_PREFIX).items():
         files[f"agents/{name}.md"] = text

@@ -188,8 +188,9 @@ def build_server(app: App):
     @tool
     def repo_map(token_budget: Optional[int] = None, focus_paths: Optional[list[str]] = None,
                  focus_names: Optional[list[str]] = None, exported_only: bool = False) -> str:
-        """PageRank-ranked map of the most important files and symbols (classes with their methods, functions with
-        signatures) that fits in token_budget tokens. focus_paths/focus_names bias the ranking toward what you are
+        """Complete map of the repository: every file with its symbols (classes with their methods, functions with
+        signatures), files ordered by PageRank. Nothing is cut unless token_budget is given, in which case only the
+        top-ranked files/symbols that fit are shown. focus_paths/focus_names bias the ranking toward what you are
         working on. Use it instead of listing or reading files."""
         return rank.repo_map(app.ix, token_budget=token_budget, focus_paths=focus_paths, focus_names=focus_names,
                              exported_only=exported_only)
