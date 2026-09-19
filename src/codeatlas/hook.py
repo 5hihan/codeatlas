@@ -37,10 +37,11 @@ def find_index(start: Path, stop: Optional[Path] = None) -> Optional[Path]:
 
     *stop* bounds the walk (tests); by default it climbs to the filesystem root.
     """
+    from .roots import protected_reason
     p = start.resolve()
     for d in (p, *p.parents):
         db = d / ".codeatlas" / "index.db"
-        if db.is_file():
+        if db.is_file() and not protected_reason(d):  # a stray index in $HOME or a user folder does not count
             return d
         if stop is not None and d == stop:
             break

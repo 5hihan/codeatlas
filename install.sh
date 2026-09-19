@@ -51,7 +51,7 @@ cat <<'EOF'
   Done.
   Claude Code : /codeatlas:find <question>, /codeatlas:snipe, or just ask; agents codeatlas-navigator/sniper/reviewer
   Codex       : type $codeatlas (Codex uses $, not /); the codeatlas MCP server starts automatically
-  Any repo    : cd into it and run `codeatlas init` once (seeds the index, SNIPE.md, agent guidance)
+  Any repo    : cd into it and run `codeatlas init` once (agents + guidance; the index builds when your agent starts there)
   Dashboard   : codeatlas open   (http://127.0.0.1:8765 while an agent session runs)
   Open a new shell if `codeatlas` is not found (PATH was just updated).
 EOF

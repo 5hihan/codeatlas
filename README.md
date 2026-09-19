@@ -50,7 +50,7 @@ every coding agent it finds on the machine (`codeatlas init --global`). Pass a p
 Then, in any repository (new or existing, empty is fine):
 
 ```bash
-codeatlas init        # seeds the index and SNIPE.md, writes agents + guidance, idempotent
+codeatlas init        # writes agents + guidance, idempotent; the index builds itself when your agent starts here
 ```
 
 <details>
@@ -181,6 +181,14 @@ codeatlas snipe [board|scan [--run tests]|next|report FILE]  the loop from the s
 codeatlas plugin export DIR | dashboard --open | open | doctor
 codeatlas hook pretool [--prefix P] [--mode default|strict|off]   Claude Code PreToolUse guard (shipped in the plugin)
 ```
+
+## Only project folders get indexed
+
+CodeAtlas refuses to index anything that is not a project: your home directory, the user folders inside it
+(Desktop, Documents, Downloads, AppData, OneDrive, ...), drive / filesystem roots and system directories
+(Windows, Program Files, `/usr`, `/Applications`, ...). Projects *inside* those folders are fine
+(`~/Desktop/my-app`). `codeatlas init`, `codeatlas serve` and the library all enforce it, and the Claude Code
+guard ignores a stray index at such a location. `CODEATLAS_ALLOW_ANY_ROOT=1` overrides it deliberately.
 
 ## How it stays fast on large repos
 

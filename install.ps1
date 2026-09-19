@@ -62,6 +62,6 @@ Write-Host ""
 Write-Host "  Done." -ForegroundColor Green
 Write-Host "  Claude Code : /codeatlas:find <question>, /codeatlas:snipe, or just ask; agents codeatlas-navigator/sniper/reviewer"
 Write-Host "  Codex       : type `$codeatlas (Codex uses `$, not /); the codeatlas MCP server starts automatically"
-Write-Host "  Any repo    : cd into it and run `codeatlas init` once (seeds the index, SNIPE.md, agent guidance)"
+Write-Host "  Any repo    : cd into it and run `codeatlas init` once (agents + guidance; the index builds when your agent starts there)"
 Write-Host "  Dashboard   : codeatlas open   (http://127.0.0.1:8765 while an agent session runs)"
 Write-Host "  Open a new terminal if 'codeatlas' is not found (PATH was just updated)." -ForegroundColor DarkGray

@@ -28,6 +28,13 @@ def _repo(args) -> Path:
     p = Path(getattr(args, "repo", None) or os.environ.get("CODEATLAS_REPO") or os.getcwd()).resolve()
     if not p.is_dir():
         sys.exit(f"repo path does not exist: {p}")
+    if not getattr(args, "global_", False):  # `init --global` may run from anywhere; it never touches an index
+        from .roots import protected_reason
+        reason = protected_reason(p)
+        if reason:
+            sys.exit(f"codeatlas: refusing to index: {reason}.\nCodeAtlas indexes project folders only: "
+                     f"cd into a repository (or pass --repo <project>) and run it there.\n"
+                     f"Set CODEATLAS_ALLOW_ANY_ROOT=1 to override deliberately.")
     return p
 
 
@@ -301,45 +308,6 @@ def write_guides(repo: Path) -> list[str]:
     return out
 
 
-def cmd_install(args) -> None:
-    repo = _repo(args)
-    targets = ["claude", "codex", "cursor"] if args.agent in ("all", None) else [args.agent]
-    msgs = []
-    for t in targets:
-        if t == "claude":
-            msgs.append(install_claude(repo, args.scope))
-        elif t == "codex":
-            msgs.append(install_codex(repo))
-        elif t == "cursor":
-            msgs.append(install_cursor(repo))
-    if not args.no_guides:
-        for p in write_guides(repo):
-            msgs.append(f"wrote agent guidance into {p}")
-    if "claude" in targets and not args.no_agents:
-        from .agents import write_project_agents
-        written = write_project_agents(repo)
-        msgs.append(f"wrote Claude Code agents ({len(written)}): codeatlas-navigator, codeatlas-sniper, codeatlas-reviewer "
-                    f"into {repo / '.claude' / 'agents'} (or use the plugin: codeatlas plugin export)")
-    # build the index now so the first agent session is instant
-    from . import rank
-    from .snipe import Snipe
-    ix, atlas = _atlas(repo)
-    st = ix.update(progress=lambda m: print(m, file=sys.stderr, end="\r"))
-    rank.compute_pagerank(ix)
-    sn = Snipe(atlas)
-    r = sn.scan()
-    det = sn.detect_test_cmd()
-    msgs.append(f"indexed {st.scanned} files; SNIPE.md seeded: {r['issues_open']} issues, {r['opportunities']} opportunities; "
-                f"test command: {det[0] if det else 'not detected (snipe_config test_cmd=...)'}")
-    gi = repo / ".gitignore"
-    if gi.exists() and ".codeatlas" not in gi.read_text(encoding="utf-8", errors="replace"):
-        with gi.open("a", encoding="utf-8") as fh:
-            fh.write("\n# CodeAtlas index (SNIPE.md is meant to be committed)\n.codeatlas/index.db*\n.codeatlas/dashboard.json\n")
-        msgs.append("added .codeatlas/index.db to .gitignore")
-    print("\n".join(msgs))
-    print("\nNext: start your agent in this repo. The server (and dashboard) start automatically with it.")
-
-
 def cmd_plugin(args) -> None:
     from .agents import write_plugin
     target = Path(args.dir).resolve()
@@ -356,13 +324,6 @@ def detect_agents() -> dict[str, bool]:
     return {"claude": bool(shutil.which("claude")) or (home / ".claude").exists(),
             "codex": bool(shutil.which("codex")) or (home / ".codex").exists(),
             "cursor": (home / ".cursor").exists()}
-
-
-def _has_sources(repo: Path) -> bool:
-    from .indexer import walk_repo
-    for _ in walk_repo(repo):
-        return True
-    return False
 
 
 def setup_global(msgs: list[str]) -> None:
@@ -457,35 +418,23 @@ def cmd_init(args) -> None:
                 msgs.append(install_codex(repo))
             elif t == "cursor":
                 msgs.append(install_cursor(repo))
-    # per-project seeding (skipped for --global when the cwd is not a project)
-    seed = not getattr(args, "global_", False) or _has_sources(repo) or (repo / ".git").exists()
-    if seed:
+    # init never indexes: the index is built by the agent's server (`codeatlas serve`) when a session starts in
+    # a project folder, and kept live by the watcher. `--global` may run from anywhere and touches no project.
+    if not getattr(args, "global_", False):
         if not args.no_guides:
             for p in write_guides(repo):
                 msgs.append(f"wrote agent guidance into {p}")
-        from . import rank
-        from .snipe import Snipe
-        ix, atlas = _atlas(repo)
-        st = ix.update(progress=lambda m: print(m, file=sys.stderr, end="\r"))
-        rank.compute_pagerank(ix)
-        sn = Snipe(atlas)
-        r = sn.scan()
-        det = sn.detect_test_cmd()
-        if st.scanned == 0:
-            msgs.append("no source files yet: the index fills in automatically as you add code (17 languages)")
-        else:
-            msgs.append(f"indexed {st.scanned} files; SNIPE.md: {r['issues_open']} issues, {r['opportunities']} opportunities; "
-                        f"test command: {det[0] if det else 'not detected (snipe_config test_cmd=...)'}")
         gi = repo / ".gitignore"
         marker = ".codeatlas/index.db"
         if not gi.exists() or marker not in gi.read_text(encoding="utf-8", errors="replace"):
             with gi.open("a", encoding="utf-8") as fh:
                 fh.write("\n# CodeAtlas index (SNIPE.md is meant to be committed)\n.codeatlas/index.db*\n.codeatlas/dashboard.json\n")
             msgs.append("added .codeatlas/index.db to .gitignore")
-        ix.close()
+        msgs.append("the index builds itself when your agent starts here (or run `codeatlas index` now)")
     print("\n".join(msgs))
     agents_line = ", ".join(t for t in targets) if not getattr(args, "global_", False) else "all detected agents"
-    print(f"\nCodeAtlas is ready for {agents_line}. Start your agent in this repo: the server, watcher and dashboard start with it."
+    print(f"\nCodeAtlas is ready for {agents_line}. Open your agent in a project folder: the server indexes that folder, "
+          "then the watcher and dashboard keep it live."
           + ("" if getattr(args, "global_", False) or not detected.get("claude") else
              "\nTip: `codeatlas init --global` once makes every project work without this step (Claude Code plugin + Codex)."))
 
@@ -590,7 +539,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     add("open", cmd_open, help="open the running dashboard in a browser")
     for name in ("init", "install"):
         p = add(name, cmd_init, help="set up CodeAtlas here: detect Claude Code / Codex / Cursor, register the server, "
-                                      "write agents + guidance, seed the index and SNIPE.md (idempotent)")
+                                      "write agents + guidance; the index builds when the agent starts (idempotent)")
         p.add_argument("agent", nargs="?", choices=["auto", "claude", "codex", "cursor", "all"], default="auto",
                        help="which agent(s) to register (default: auto-detect installed ones)")
         p.add_argument("--global", dest="global_", action="store_true",

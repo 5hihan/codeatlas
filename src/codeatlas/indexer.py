@@ -1091,7 +1091,8 @@ class Index:
     """SQLite-backed code index for one repository."""
 
     def __init__(self, repo: Path, db_path: Optional[Path] = None):
-        self.repo = Path(repo).resolve()
+        from .roots import check_root
+        self.repo = check_root(repo)  # never index $HOME, user folders, drive roots or system directories
         self.dir = self.repo / ".codeatlas"
         self.dir.mkdir(exist_ok=True)
         self.db_path = db_path or (self.dir / "index.db")
