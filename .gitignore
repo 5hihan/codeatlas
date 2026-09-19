@@ -1,0 +1,20 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.codeatlas/
+
+# dashboard sources live in dashboard/; the built output in src/codeatlas/static IS committed
+# so that `uv tool install git+https://...` ships the dashboard without a Node toolchain.
+dashboard/node_modules/
+dashboard/dist/
+
+# editors / tools
+.idea/
+.vscode/
+.serena/
+*.log

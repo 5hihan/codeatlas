@@ -1,0 +1,38 @@
+[project]
+name = "codeatlas"
+version = "0.1.0"
+description = "Tree-sitter powered MCP server that maps a codebase (symbols, references, call graph, dependencies) and runs the SNIPE fix loop (Scan, Narrow, Infer, Patch, Evaluate) so LLM coding agents like Claude Code and Codex can fix massive repos without reading every file."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["mcp", "tree-sitter", "code-intelligence", "claude-code", "codex", "snipe"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "mcp>=2.0",
+    "pathspec>=0.12",
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.7",
+    "watchdog>=4",
+]
+
+[project.scripts]
+codeatlas = "codeatlas.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/5hihan/codeatlas"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

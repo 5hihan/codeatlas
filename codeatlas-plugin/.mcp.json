@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "atlas": {
+      "command": "codeatlas",
+      "args": [
+        "serve",
+        "--repo",
+        "${CLAUDE_PROJECT_DIR}"
+      ]
+    }
+  }
+}

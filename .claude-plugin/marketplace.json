@@ -1,0 +1,14 @@
+{
+  "name": "codeatlas",
+  "owner": { "name": "CodeAtlas" },
+  "metadata": { "description": "CodeAtlas: tree-sitter code map, config/schema relationships and the SNIPE fix loop for large codebases." },
+  "plugins": [
+    {
+      "name": "codeatlas",
+      "source": "./codeatlas-plugin",
+      "description": "Navigator, sniper and reviewer agents plus /codeatlas:find, /codeatlas:snipe and /codeatlas:review-changes, backed by the codeatlas MCP server.",
+      "version": "0.1.0",
+      "category": "productivity"
+    }
+  ]
+}
