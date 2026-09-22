@@ -4,19 +4,31 @@ Prose in CLAUDE.md is advice; the model still reaches for the built-in ``Grep``/
 because their schemas are always loaded while MCP tools are deferred. This hook turns the advice into a rule: when a
 ``.codeatlas/index.db`` exists for the working directory, a built-in call that CodeAtlas does better is denied and
 the reason names the CodeAtlas tool (and arguments) to call instead, so the model recovers in the same turn.
-Everything the index does not know about (unindexed files, docs, config, partial reads) passes through untouched.
+
+Two things keep the rule honest, learned from a model that worked around the first version:
+
+* **Every statement counts.** ``export X=1; cd src; A=$(find . -name x); sed -n 1,50p $A | grep -v '^//'`` is split
+  on ``;``, ``&&``, ``||``, newlines, pipes and ``$(...)``, so chaining does not hide a search or a rewrite.
+* **The switch belongs to the user.** A command that assigns ``CODEATLAS_GUARD`` is denied, and no deny reason
+  advertises the variable: the model cannot talk itself out of the guard, only the user can turn it off.
+
+What the index does not cover is never gated: unindexed files, docs and config, bounded partial reads, and work in
+directories outside the indexed repository (a reference checkout, ``/tmp``, another project) where CodeAtlas has
+nothing to offer and the shell is the only tool available.
 
 Usage (hooks.json / settings.json)::
 
     codeatlas hook pretool [--prefix mcp__plugin_codeatlas_atlas] [--mode default|search|off]
 
-* ``default`` gates, for files the index knows:
-  - ``Grep``/``Glob`` and ``grep``/``rg``/``find`` run through ``Bash``      -> grep / find_symbols / references / list_files
-  - whole-file ``Read`` (no offset/limit) and ``cat`` through ``Bash``       -> file_outline / symbol_source
-  - ``Edit``/``MultiEdit`` whose old_string lies inside a declaration       -> replace_symbol / insert_code
-  - ``Write`` over an existing source file                                  -> replace_symbol / insert_code
+* ``default`` gates, for the indexed repository only:
+  - ``Grep``/``Glob`` and ``grep``/``rg``/``find`` in any Bash statement -> grep / find_symbols / references / list_files
+  - whole-file ``Read`` (no limit, or over READ_MAX_LINES) and ``cat`` in Bash -> file_outline / symbol_source
+  - ``Edit``/``MultiEdit`` whose old_string lies inside a declaration -> replace_symbol / insert_code
+  - ``Write`` over an existing source file, and shell rewrites (``sed -i``, ``>``, ``tee``, inline scripts that
+    write) of an indexed source file -> replace_symbol / insert_code
+  - any command that sets ``CODEATLAS_GUARD``
 * ``search`` gates only the search tools (the pre-0.1.1 behaviour). ``strict`` is an alias of ``default``.
-* ``off`` (or ``CODEATLAS_GUARD=off``) lets everything through.
+* ``off``, or ``CODEATLAS_GUARD=off`` in the user's own environment, lets everything through.
 """
 from __future__ import annotations
 
@@ -33,12 +45,24 @@ GATED_TOOLS = ("Grep", "Glob", "Bash", "Read", "Edit", "MultiEdit", "Write")
 SEARCH_CMDS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "ug", "ugrep", "git-grep"}
 LIST_CMDS = {"find", "fd", "fdfind"}
 CAT_CMDS = {"cat", "bat", "type", "less", "more"}  # whole-file dumps; head/tail/sed -n are partial and pass
+INPLACE_CMDS = {"sed", "gsed", "perl", "awk"}      # with -i: in-place rewrite
 # languages the indexer parses; anything else (docs, json, lock files) is never gated
 SOURCE_EXT = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".go", ".rs", ".java", ".kt", ".kts", ".swift",
               ".c", ".h", ".cpp", ".cc", ".hpp", ".cs", ".rb", ".php", ".scala", ".lua", ".dart", ".m", ".mm"}
 # an Edit inside a declaration up to this long is sent through replace_symbol; longer ones may use Edit
 EDIT_SYMBOL_MAX_LINES = 150
+# a Read of an indexed file must be a bounded window: an explicit limit of at most this many lines
+READ_MAX_LINES = 250
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_GUARD_SET = re.compile(r"CODEATLAS_GUARD\s*=|CODEATLAS_GUARD['\"]?\s*[,:]|setx?\s+CODEATLAS_GUARD|"
+                        r"environ\[['\"]CODEATLAS_GUARD", re.I)
+_STMT_SPLIT = re.compile(r"\|\||&&|;|\r?\n")
+_SUBST = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1.*?^\2$", re.S | re.M)
+_REDIRECT = re.compile(r"(?<![<>&\d])\d?>{1,2}\s*([^\s|;&<>]+)")
+_SCRIPT_WRITE = re.compile(r"write_text\(|write_bytes\(|open\([^)]*['\"][wa]b?\+?['\"]|writeFileSync\(|writeFile\(|"
+                           r"fs\.write|Set-Content|Out-File|File\.write|IO\.write|\.replace_file|shutil\.(copy|move)")
+_PATH_TOKEN = re.compile(r"[\w./\\~:-]+\.(?:" + "|".join(sorted(e[1:] for e in SOURCE_EXT)) + r")\b")
 
 
 def find_index(start: Path, stop: Optional[Path] = None) -> Optional[Path]:
@@ -99,31 +123,19 @@ def enclosing_symbol(root: Path, rel: str, start: int, end: int) -> Optional[dic
 
 
 # ------------------------------------------------------------------ Bash command inspection
-def _first_words(command: str) -> list[list[str]]:
-    """Split a shell command line into segments (``|``, ``&&``, ``||``, ``;``) and return each segment's argv."""
-    out: list[list[str]] = []
-    for seg in re.split(r"\|\||&&|;|\||\n", command):
-        seg = seg.strip()
-        if not seg:
-            continue
-        try:
-            argv = shlex.split(seg, posix=True)
-        except ValueError:
-            argv = seg.split()
-        # drop leading env assignments, `cd X`, `command`, `sudo`, `time`
-        while argv and ("=" in argv[0] and not argv[0].startswith("=") or argv[0] in ("command", "sudo", "time", "nice")):
-            argv = argv[1:]
-        if argv:
-            out.append(argv)
-    return out
-
-
-def _primary(command: str) -> Optional[list[str]]:
-    """argv of the segment that starts the command (after an optional leading ``cd``)."""
-    segs = _first_words(command)
-    if segs and segs[0][0] == "cd" and len(segs) > 1:
-        segs = segs[1:]
-    return segs[0] if segs else None
+def _argv(segment: str) -> list[str]:
+    """argv of one simple command, without leading env assignments, ``command``, ``sudo``, ``time``, ``nice``."""
+    segment = segment.strip()
+    if not segment:
+        return []
+    try:
+        argv = shlex.split(segment, posix=True)
+    except ValueError:
+        argv = segment.split()
+    while argv and ("=" in argv[0] and not argv[0].startswith("=") or argv[0] in ("command", "sudo", "time", "nice",
+                                                                                  "export", "env", "set")):
+        argv = argv[1:]
+    return argv
 
 
 def _head(argv: list[str]) -> str:
@@ -131,31 +143,111 @@ def _head(argv: list[str]) -> str:
     return head[:-4] if head.endswith(".exe") else head
 
 
-def bash_search(command: str) -> Optional[str]:
-    """Return 'grep' or 'find' when the *primary* action of a Bash command is a text search / file listing.
+def _operands(argv: list[str]) -> list[str]:
+    """Positional arguments, skipping flags and the value of a flag that takes one."""
+    out, skip = [], False
+    for a in argv[1:]:
+        if skip:
+            skip = False
+            continue
+        if a.startswith("-"):
+            skip = a in ("-e", "-f", "--expression", "--file", "--include", "--exclude", "-o", "--output")
+            continue
+        out.append(a)
+    return out
 
-    A search used as a filter later in a pipeline (``git log | grep x``) is left alone; only a segment that starts
-    the command (after an optional ``cd``) counts, since that is the model using Bash as its search tool.
+
+def _inplace(argv: list[str]) -> bool:
+    return any(a == "--in-place" or a.startswith("--in-place=") or
+               (a.startswith("-") and not a.startswith("--") and "i" in a[1:]) for a in argv[1:])
+
+
+def _strip_heredocs(command: str) -> str:
+    """Remove heredoc bodies: their lines are script source, not shell statements, and must not be parsed as such."""
+    return _HEREDOC.sub("<<HEREDOC", command)
+
+
+def bash_actions(command: str) -> list[tuple[str, Optional[str]]]:
+    """Classify everything a Bash command does, as ``(kind, operand)`` pairs.
+
+    Every statement is inspected (``;``, ``&&``, ``||``, newlines and the inside of ``$(...)``/backticks), so
+    chaining does not hide a search. ``cd`` is tracked so operands resolve against the directory in force at that
+    point, and each returned path operand is absolute-ish text the caller resolves. Within a pipeline only the first
+    command counts as a search or a dump (``git log | grep x`` is a filter and passes), while in-place rewrites and
+    ``>`` redirections count anywhere.
+
+    kinds: ``grep``/``find`` (operand = the directory they run in), ``cat``/``write`` (operand = the file),
+    ``guard`` (the command sets CODEATLAS_GUARD itself).
     """
-    argv = _primary(command)
-    if not argv:
-        return None
-    head = _head(argv)
-    if head in SEARCH_CMDS:
-        return "grep"
-    if head == "git" and len(argv) > 1 and argv[1] == "grep":
-        return "grep"
-    if head in LIST_CMDS:
-        return "find"
+    acts: list[tuple[str, Optional[str]]] = []
+    if _GUARD_SET.search(command):
+        acts.append(("guard", None))
+    here = ""  # directory in force, relative to the tool's cwd unless a `cd` made it absolute
+    for stmt in _STMT_SPLIT.split(_strip_heredocs(command)):
+        # a command substitution runs where the enclosing statement runs, and its `cd` does not outlive it
+        for inner in (m.group(1) or m.group(2) or "" for m in _SUBST.finditer(stmt)):
+            sub_here = here
+            for s in _STMT_SPLIT.split(inner):
+                sub_here = _statement(s, sub_here, acts)
+        here = _statement(_SUBST.sub("SUBST", stmt), here, acts)
+    if _SCRIPT_WRITE.search(command):
+        acts.extend(("write", t) for t in _PATH_TOKEN.findall(command))
+    return acts
+
+
+def _statement(stmt: str, here: str, acts: list[tuple[str, Optional[str]]]) -> str:
+    """Record what one shell statement does and return the directory in force after it (``cd`` updates it)."""
+    stmt = stmt.strip()
+    if not stmt:
+        return here
+    for m in _REDIRECT.finditer(stmt):
+        if m.group(1) != "/dev/null":
+            acts.append(("write", _join(here, m.group(1))))
+    cmds = [a for a in (_argv(seg) for seg in stmt.split("|")) if a]
+    if not cmds:
+        return here
+    first = cmds[0]
+    head = _head(first)
+    if head == "cd":
+        ops = _operands(first)
+        return _join(here, ops[0]) if ops else ""
+    if head in SEARCH_CMDS or (head == "git" and len(first) > 1 and first[1] == "grep"):
+        acts.append(("grep", _search_dir(here, first)))
+    elif head in LIST_CMDS:
+        acts.append(("find", _search_dir(here, first)))
+    elif head in CAT_CMDS:
+        acts.extend(("cat", _join(here, a)) for a in _operands(first))
+    for argv in cmds:
+        h = _head(argv)
+        if (h in INPLACE_CMDS and _inplace(argv)) or h == "tee":
+            acts.extend(("write", _join(here, a)) for a in _operands(argv))
+    return here
+
+
+def _join(here: str, operand: str) -> str:
+    """Resolve *operand* against the ``cd`` in force, keeping it relative to the tool's cwd when both are."""
+    operand = os.path.expanduser(operand.strip("'\""))
+    if not here or os.path.isabs(operand):
+        return operand
+    return os.path.join(os.path.expanduser(here), operand)
+
+
+def _search_dir(here: str, argv: list[str]) -> str:
+    """Where a search runs: its last path-looking operand, else the directory in force.
+
+    Only the shape of the operand is used (a separator, ``.``/``..`` or ``~``), never a filesystem probe: the hook's
+    own working directory is not the tool's, so ``Path(o).is_dir()`` would answer about the wrong tree.
+    """
+    ops = [o for o in _operands(argv) if "/" in o or "\\" in o or o in (".", "..") or o.startswith("~")]
+    return _join(here, ops[-1]) if ops else (here or ".")
+
+
+def bash_search(command: str) -> Optional[str]:
+    """'grep' or 'find' when any statement of the command starts a text search / file listing, else None."""
+    for kind, _ in bash_actions(command):
+        if kind in ("grep", "find"):
+            return kind
     return None
-
-
-def bash_cat_files(command: str) -> list[str]:
-    """File operands when the primary action of a Bash command is a whole-file dump (``cat``, ``bat``, ``type``)."""
-    argv = _primary(command)
-    if not argv or _head(argv) not in CAT_CMDS:
-        return []
-    return [a for a in argv[1:] if not a.startswith("-")]
 
 
 # ------------------------------------------------------------------ decisions
@@ -169,36 +261,28 @@ def decide(event: dict, prefix: str = DEFAULT_PREFIX, mode: str = "default") -> 
     inp = event.get("tool_input") or {}
     if tool not in GATED_TOOLS:
         return None
-    root = find_index(Path(event.get("cwd") or os.getcwd()))
+    cwd = Path(event.get("cwd") or os.getcwd())
+    root = find_index(cwd)
     if root is None:
         return None
     if tool == "Grep":
+        if not _inside(root, cwd, str(inp.get("path") or "")):
+            return None  # searching another tree: CodeAtlas does not index it
         return _deny_grep(root, prefix, str(inp.get("pattern") or ""))
     if tool == "Glob":
+        if not _inside(root, cwd, str(inp.get("path") or "")):
+            return None
         return (f"This repository is indexed by CodeAtlas ({root}). Use `{prefix}__list_files(prefix=\"dir/\")` to list "
                 f"source files (with language, line and symbol counts) or `{prefix}__find_symbols(query)` to locate a "
                 f"symbol, instead of Glob." + _tail(prefix, "grep"))
     if tool == "Bash":
-        command = str(inp.get("command") or "")
-        kind = bash_search(command)
-        if kind == "grep":
-            return (f"This repository is indexed by CodeAtlas ({root}). Do not shell out to grep/rg: use "
-                    f"`{prefix}__grep(pattern=..., glob=...)` for text, `{prefix}__find_symbols` / `{prefix}__references` "
-                    f"for identifiers." + _tail(prefix, "grep"))
-        if kind == "find":
-            return (f"This repository is indexed by CodeAtlas ({root}). Use `{prefix}__list_files(prefix=\"dir/\")` "
-                    f"instead of find." + _tail(prefix, "grep"))
-        if full:
-            for fp in bash_cat_files(command):
-                r = _deny_read(root, prefix, str((Path(event.get("cwd") or root) / fp)), via="cat")
-                if r:
-                    return r
-        return None
+        return _deny_bash(root, cwd, prefix, str(inp.get("command") or ""), full)
     if not full:
         return None
     fp = str(inp.get("file_path") or inp.get("path") or "")
     if tool == "Read":
-        if inp.get("offset") is None and inp.get("limit") is None:
+        limit = inp.get("limit")
+        if not (isinstance(limit, (int, float)) and not isinstance(limit, bool) and 0 < limit <= READ_MAX_LINES):
             return _deny_read(root, prefix, fp)
         return None
     if tool in ("Edit", "MultiEdit"):
@@ -210,9 +294,9 @@ def decide(event: dict, prefix: str = DEFAULT_PREFIX, mode: str = "default") -> 
 
 def _tail(prefix: str, *tools: str) -> str:
     sel = ",".join(f"{prefix}__{t}" for t in tools)
-    return (f" (If the tool schema is not loaded yet, call ToolSearch with \"select:{sel}\" first. "
-            f"This guard is CodeAtlas; CODEATLAS_GUARD=search keeps only the search redirects, CODEATLAS_GUARD=off "
-            f"disables it.)")
+    return (f" (If the tool schema is not loaded yet, call ToolSearch with \"select:{sel}\" first. This guard is "
+            f"CodeAtlas, configured by the user in their own settings: a command cannot change it, and directories "
+            f"outside this repository are not affected.)")
 
 
 def _deny_grep(root: Path, prefix: str, pattern: str) -> str:
@@ -223,6 +307,37 @@ def _deny_grep(root: Path, prefix: str, pattern: str) -> str:
             f"instead of the built-in Grep: it searches the same files and returns path:line hits. {hint}"
             f"Use `{prefix}__task_context(task, scope)` when you are starting a task rather than looking for one string."
             + _tail(prefix, "grep"))
+
+
+def _deny_bash(root: Path, cwd: Path, prefix: str, command: str, full: bool) -> Optional[str]:
+    acts = bash_actions(command)
+    if full and any(k == "guard" for k, _ in acts):
+        return (f"This command sets CODEATLAS_GUARD. That setting belongs to the user and cannot be changed from "
+                f"inside a command, so remove the assignment and run the rest. If you need to search or read this "
+                f"repository, use `{prefix}__grep` / `{prefix}__find_symbols`, `{prefix}__file_outline` + "
+                f"`{prefix}__symbol_source`, and `{prefix}__replace_symbol` / `{prefix}__insert_code` to change code. "
+                f"If the command works on a directory outside this repository, it is not gated at all: run it "
+                f"unchanged." + _tail(prefix, "grep", "symbol_source", "replace_symbol"))
+    for kind, operand in acts:
+        if kind in ("grep", "find") and _inside(root, cwd, operand or "."):
+            if kind == "grep":
+                return (f"This repository is indexed by CodeAtlas ({root}). Do not shell out to grep/rg in any "
+                        f"statement of a command: use `{prefix}__grep(pattern=..., glob=...)` for text, "
+                        f"`{prefix}__find_symbols` / `{prefix}__references` for identifiers. A search of a directory "
+                        f"outside this repository is allowed." + _tail(prefix, "grep"))
+            return (f"This repository is indexed by CodeAtlas ({root}). Use `{prefix}__list_files(prefix=\"dir/\")` "
+                    f"instead of find. Listing a directory outside this repository is allowed." + _tail(prefix, "grep"))
+        if not full:
+            continue
+        if kind == "cat":
+            r = _deny_read(root, prefix, str(_abs(cwd, operand)), via="cat")
+        elif kind == "write":
+            r = _deny_bash_write(root, prefix, str(_abs(cwd, operand)))
+        else:
+            continue
+        if r:
+            return r
+    return None
 
 
 def _indexed_source(root: Path, fp: str) -> Optional[tuple[str, dict]]:
@@ -244,8 +359,8 @@ def _deny_read(root: Path, prefix: str, fp: str, via: str = "Read") -> Optional[
             f"structure with `{prefix}__file_outline(\"{rel}\")`, then read only the declarations you need with "
             f"`{prefix}__symbol_source(\"<Name or Class.method>\", path=\"{rel}\")` (or "
             f"`{prefix}__symbol_source(\"{rel}:START-END\")` for a line range). `{prefix}__task_context(task, scope)` "
-            f"gathers the relevant symbols across files in one call. Read with an explicit offset/limit is still "
-            f"allowed when you need raw lines." + _tail(prefix, "file_outline", "symbol_source"))
+            f"gathers the relevant symbols across files in one call. Read is allowed as a bounded window: an explicit "
+            f"offset with a limit of at most {READ_MAX_LINES} lines." + _tail(prefix, "file_outline", "symbol_source"))
 
 
 def _edit_ranges(root: Path, rel: str, edits: Iterable[dict]) -> list[tuple[int, int]]:
@@ -299,6 +414,30 @@ def _deny_write(root: Path, prefix: str, fp: str) -> Optional[str]:
             f"`{prefix}__replace_symbol(name, path=\"{rel}\", new_text=...)`, add code with "
             f"`{prefix}__insert_code(name, new_text, where, path=\"{rel}\")`, and use Edit only for lines outside "
             f"declarations. Write is for new files." + _tail(prefix, "replace_symbol", "insert_code"))
+
+
+def _deny_bash_write(root: Path, prefix: str, fp: str) -> Optional[str]:
+    hit = _indexed_source(root, fp)
+    if not hit or not Path(fp).is_file():
+        return None
+    rel, info = hit
+    return (f"This command rewrites {rel} from the shell (sed -i, redirection, tee or an inline script); the file is "
+            f"indexed by CodeAtlas ({info['lines']} lines, {info['symbols']} symbols). Change it with "
+            f"`{prefix}__replace_symbol(name, path=\"{rel}\", new_text=...)` or `{prefix}__insert_code(...)`, which "
+            f"are parse-checked and re-indexed at once, or with Edit for lines outside declarations. If the command "
+            f"only reads the file, use `{prefix}__symbol_source` instead." + _tail(prefix, "replace_symbol", "insert_code"))
+
+
+def _abs(cwd: Path, operand: Optional[str]) -> Path:
+    p = Path(os.path.expanduser(operand or ""))
+    return p if p.is_absolute() else cwd / p
+
+
+def _inside(root: Path, cwd: Path, operand: str) -> bool:
+    """True when *operand* (a path, possibly relative to *cwd*) lies inside the indexed repository."""
+    if not operand:
+        return True
+    return _under(root, str(_abs(cwd, operand)))
 
 
 def _under(root: Path, fp: str) -> bool:

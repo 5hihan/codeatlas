@@ -231,15 +231,20 @@ def write_plugin(target: Path) -> list[str]:
                       "the `codeatlas-navigator`, `codeatlas-sniper` and `codeatlas-reviewer` agents.\n\n"
                       "`hooks/hooks.json` installs a PreToolUse guard. In a repository that has a `.codeatlas/index.db`, "
                       "for files the index\nknows, it denies with a message naming the CodeAtlas tool to use instead:\n\n"
-                      "- built-in Grep/Glob and `grep`/`rg`/`find` through Bash -> `grep`, `find_symbols`, `references`, "
+                      "- Grep/Glob and `grep`/`rg`/`find` in any Bash statement -> `grep`, `find_symbols`, `references`, "
                       "`list_files`\n"
-                      "- whole-file Read (no offset/limit) and `cat` through Bash -> `file_outline`, `symbol_source`\n"
+                      "- whole-file Read and `cat` through Bash -> `file_outline`, `symbol_source`\n"
                       "- Edit whose old_string lies inside a declaration (up to 150 lines) -> `replace_symbol`, "
                       "`insert_code`\n"
-                      "- Write over an existing source file -> `replace_symbol`, `insert_code` (Write is for new files)\n\n"
-                      "Unindexed files, docs and config, partial reads and edits outside declarations pass through. "
-                      "`CODEATLAS_GUARD=search`\nkeeps only the search redirects; `CODEATLAS_GUARD=off` disables the "
-                      "guard.\n"),
+                      "- Write over an existing source file, `sed -i`, `>`, `tee`, inline scripts that write -> "
+                      "`replace_symbol`, `insert_code`\n"
+                      "- any command that sets `CODEATLAS_GUARD`: the switch belongs to the user, not to the model\n\n"
+                      "Every statement of a command is inspected (`;`, `&&`, `|`, newlines, `$(...)`), so chaining does "
+                      "not hide a search,\nand no deny message names the off switch. Never gated: unindexed files, docs "
+                      "and config, bounded partial reads,\nedits outside declarations, and any directory outside the "
+                      "indexed repository (a reference checkout, another\nproject), where CodeAtlas has no index and the "
+                      "shell is the only tool. Set `CODEATLAS_GUARD=search` in your own\nenvironment for search-only "
+                      "redirects, or `off` to disable the guard.\n"),
     }
     for name, text in agent_files(PLUGIN_PREFIX).items():
         files[f"agents/{name}.md"] = text
