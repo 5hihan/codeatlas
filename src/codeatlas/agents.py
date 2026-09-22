@@ -99,8 +99,10 @@ files; every answer carries `path:line` anchors you can open.
 | fix the next concrete issue | `next_snipe` -> `claim_snipe` -> `get_snipe_context` -> patch -> `verify_snipe` |
 | report a failure | `snipe_report(text)` |
 
-Rules: outline before reading; read symbols, not files; check `impact` before changing a signature; keep patches
-to the smallest surface; log side findings with `snipe_add` instead of fixing them on the spot.
+Rules: outline before reading; read symbols, not files; change declarations with `replace_symbol` / `insert_code`
+(never rewrite a whole file); check `impact` before changing a signature; keep patches to the smallest surface; log
+side findings with `snipe_add` instead of fixing them on the spot. The plugin's PreToolUse guard enforces this for
+indexed files: a denied Grep/Read/Edit/Write names the CodeAtlas call to make instead.
 
 Delegate: use the `codeatlas-navigator` agent for research questions, `codeatlas-sniper` to fix an issue end to
 end, `codeatlas-reviewer` to review a change set.
@@ -188,14 +190,16 @@ def write_project_agents(repo: Path) -> list[str]:
 
 
 def plugin_hooks(prefix: str) -> dict:
-    """Claude Code hooks: a PreToolUse guard that denies built-in text search when the repo is indexed.
+    """Claude Code hooks: a PreToolUse guard that denies built-in search, whole-file reads and in-declaration edits
+    when the repo is indexed.
 
-    Advice in CLAUDE.md is not enough: Grep/Glob schemas are always loaded while MCP tools are deferred, so the
-    model reaches for Grep by default. The guard (``codeatlas hook pretool``) turns the advice into a rule and its
-    deny reason names the CodeAtlas tool to call instead, so the model recovers in the same turn.
+    Advice in CLAUDE.md is not enough: Grep/Glob/Read/Edit schemas are always loaded while MCP tools are deferred,
+    so the model reaches for them by default. The guard (``codeatlas hook pretool``) turns the advice into a rule
+    and its deny reason names the CodeAtlas tool (and arguments) to call instead, so the model recovers in the same
+    turn. See :mod:`codeatlas.hook` for exactly what is gated.
     """
     return {"hooks": {"PreToolUse": [{
-        "matcher": "Grep|Glob|Bash|Read",
+        "matcher": "Grep|Glob|Bash|Read|Edit|MultiEdit|Write",
         "hooks": [{"type": "command", "command": f"codeatlas hook pretool --prefix {prefix}",
                    "timeout": 10, "continueOnBlock": True}],
     }]}}
@@ -225,11 +229,17 @@ def write_plugin(target: Path) -> list[str]:
                       "(`uv tool install codeatlas`). Load with `claude --plugin-dir <this dir>` or install it, then use\n"
                       "`/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to\n"
                       "the `codeatlas-navigator`, `codeatlas-sniper` and `codeatlas-reviewer` agents.\n\n"
-                      "`hooks/hooks.json` installs a PreToolUse guard: in a repository that has a `.codeatlas/index.db`, "
-                      "the built-in\nGrep and Glob tools and `grep`/`rg`/`find` run through Bash are denied with a message "
-                      "naming the CodeAtlas tool to\nuse instead (`grep`, `find_symbols`, `references`, `list_files`). "
-                      "Set `CODEATLAS_GUARD=off` to disable it, or\n`CODEATLAS_GUARD=strict` to also redirect whole-file "
-                      "Read of indexed source files to `file_outline` / `symbol_source`.\n"),
+                      "`hooks/hooks.json` installs a PreToolUse guard. In a repository that has a `.codeatlas/index.db`, "
+                      "for files the index\nknows, it denies with a message naming the CodeAtlas tool to use instead:\n\n"
+                      "- built-in Grep/Glob and `grep`/`rg`/`find` through Bash -> `grep`, `find_symbols`, `references`, "
+                      "`list_files`\n"
+                      "- whole-file Read (no offset/limit) and `cat` through Bash -> `file_outline`, `symbol_source`\n"
+                      "- Edit whose old_string lies inside a declaration (up to 150 lines) -> `replace_symbol`, "
+                      "`insert_code`\n"
+                      "- Write over an existing source file -> `replace_symbol`, `insert_code` (Write is for new files)\n\n"
+                      "Unindexed files, docs and config, partial reads and edits outside declarations pass through. "
+                      "`CODEATLAS_GUARD=search`\nkeeps only the search redirects; `CODEATLAS_GUARD=off` disables the "
+                      "guard.\n"),
     }
     for name, text in agent_files(PLUGIN_PREFIX).items():
         files[f"agents/{name}.md"] = text

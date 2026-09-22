@@ -179,8 +179,25 @@ codeatlas serve [--repo PATH] [--profile nav|edit|snipe|all]  MCP server + watch
 codeatlas context "<task>" | changes [--base REF] | map | overview | outline PATH | symbol NAME | impact NAME
 codeatlas snipe [board|scan [--run tests]|next|report FILE]  the loop from the shell
 codeatlas plugin export DIR | dashboard --open | open | doctor
-codeatlas hook pretool [--prefix P] [--mode default|strict|off]   Claude Code PreToolUse guard (shipped in the plugin)
+codeatlas hook pretool [--prefix P] [--mode default|search|off]   Claude Code PreToolUse guard (shipped in the plugin)
 ```
+
+## The guard: advice becomes a rule
+
+Telling the model to "use CodeAtlas" in CLAUDE.md is not enough: the built-in Grep, Glob, Read and Edit schemas
+are always loaded while MCP tools are deferred, so the model reaches for them by default. The plugin ships a
+PreToolUse hook that, in a repository with a `.codeatlas/index.db` and only for files the index knows, denies the
+built-in call and names the CodeAtlas call to make instead, so the model recovers in the same turn:
+
+| Built-in call | Redirected to |
+|---|---|
+| Grep, Glob, `grep`/`rg`/`find` through Bash | `grep`, `find_symbols`, `references`, `list_files` |
+| whole-file Read (no offset/limit), `cat` through Bash | `file_outline`, then `symbol_source` for the declarations needed |
+| Edit whose old_string lies inside a declaration (up to 150 lines) | `replace_symbol("<the enclosing symbol>", ...)`, `insert_code` |
+| Write over an existing source file | `replace_symbol` / `insert_code` (Write is for new files) |
+
+Unindexed files, docs and config, partial reads, and edits outside declarations (imports, module-level code) pass
+through. `CODEATLAS_GUARD=search` keeps only the search redirects; `CODEATLAS_GUARD=off` disables the guard.
 
 ## Only project folders get indexed
 

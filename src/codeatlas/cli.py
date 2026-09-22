@@ -8,7 +8,7 @@
   codeatlas snipe [board|scan|next|md|report FILE]   the SNIPE loop from the shell
   codeatlas dashboard [--open]          run only the dashboard
   codeatlas doctor                      check installation
-  codeatlas hook pretool                Claude Code PreToolUse guard: Grep/Glob/grep -> CodeAtlas tools (used by the plugin)
+  codeatlas hook pretool                Claude Code PreToolUse guard: Grep/Read/Edit/Write -> CodeAtlas tools (used by the plugin)
 """
 from __future__ import annotations
 
@@ -204,7 +204,8 @@ GUIDE_BLOCK = """
 This repo is indexed by the `codeatlas` MCP server. Before reading files, use its tools:
 start with `task_context("<what you are doing>", scope="dir/")`, then `file_outline`, `find_symbols`, `symbol`,
 `symbol_source`, `references`, `impact`, `triggers`, `dependencies`; `change_context` before finishing.
-Edit precisely with `replace_symbol` / `insert_code` / `rename_symbol` (syntax-checked).
+Read symbols, not whole files. Edit precisely with `replace_symbol` / `insert_code` / `rename_symbol`
+(syntax-checked); never rewrite a whole source file.
 Fix work follows SNIPE (Scan, Narrow, Infer, Patch, Evaluate): `next_snipe(agent="<your id>")` ->
 `claim_snipe(id)` -> `get_snipe_context(id, level)` (climb levels only as needed) -> smallest patch ->
 `verify_snipe(id)` -> next. Paste failures into `snipe_report`; log drive-by findings with `snipe_add`; never
@@ -551,7 +552,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     p.add_argument("action", nargs="?", default="export", choices=["export"])
     p.add_argument("dir", nargs="?", default="codeatlas-plugin", help="target directory (default ./codeatlas-plugin)")
     add("doctor", cmd_doctor, help="check the installation")
-    p = sub.add_parser("hook", help="Claude Code hook runner (PreToolUse guard that redirects Grep/Glob/grep to CodeAtlas)")
+    p = sub.add_parser("hook", help="Claude Code hook runner (PreToolUse guard that redirects Grep/Glob/Read/Edit/Write "
+                                    "of indexed files to CodeAtlas tools)")
     p.add_argument("hook_args", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_hook)
 

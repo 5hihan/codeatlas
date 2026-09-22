@@ -1,6 +1,6 @@
 [project]
 name = "codeatlas"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tree-sitter powered MCP server that maps a codebase (symbols, references, call graph, dependencies) and runs the SNIPE fix loop (Scan, Narrow, Infer, Patch, Evaluate) so LLM coding agents like Claude Code and Codex can fix massive repos without reading every file."
 readme = "README.md"
 license = "MIT"

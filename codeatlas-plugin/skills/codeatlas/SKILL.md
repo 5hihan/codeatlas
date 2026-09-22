@@ -20,8 +20,10 @@ files; every answer carries `path:line` anchors you can open.
 | fix the next concrete issue | `next_snipe` -> `claim_snipe` -> `get_snipe_context` -> patch -> `verify_snipe` |
 | report a failure | `snipe_report(text)` |
 
-Rules: outline before reading; read symbols, not files; check `impact` before changing a signature; keep patches
-to the smallest surface; log side findings with `snipe_add` instead of fixing them on the spot.
+Rules: outline before reading; read symbols, not files; change declarations with `replace_symbol` / `insert_code`
+(never rewrite a whole file); check `impact` before changing a signature; keep patches to the smallest surface; log
+side findings with `snipe_add` instead of fixing them on the spot. The plugin's PreToolUse guard enforces this for
+indexed files: a denied Grep/Read/Edit/Write names the CodeAtlas call to make instead.
 
 Delegate: use the `codeatlas-navigator` agent for research questions, `codeatlas-sniper` to fix an issue end to
 end, `codeatlas-reviewer` to review a change set.
