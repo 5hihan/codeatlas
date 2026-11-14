@@ -219,3 +219,29 @@ def test_compact_symbol_and_impact_fold_hubs_only(tmp_path: Path):
     small_i = atlas.impact("leaf")
     assert fmt.impact(small_i, compact=True) == fmt.impact(small_i)
     ix.close()
+
+
+def test_user_config_options_reach_hook_and_manifest(repo: Path, capsys, monkeypatch):
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "codeatlas-plugin" / ".claude-plugin" / "plugin.json").read_text())
+    uc = manifest["userConfig"]
+    assert set(uc) == {"guard_mode", "auto_approve", "dashboard"}
+    for opt in uc.values():
+        assert {"type", "title", "description", "default"} <= set(opt)
+    assert "${user_config.dashboard}" in (Path(__file__).resolve().parents[1] / "codeatlas-plugin" / ".mcp.json").read_text()
+    prefix = "mcp__plugin_codeatlas_atlas"
+    ev = {"tool_name": f"{prefix}__task_context", "tool_input": {}, "hook_event_name": "PreToolUse", "cwd": "/"}
+    monkeypatch.delenv("CODEATLAS_AUTO_APPROVE", raising=False)
+    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_AUTO_APPROVE", "false")
+    assert _run_hook(["pretool", "--prefix", prefix], ev, capsys, monkeypatch) is None, "plugin option turns approval off"
+    monkeypatch.setenv("CODEATLAS_AUTO_APPROVE", "on")
+    assert _run_hook(["pretool", "--prefix", prefix], ev, capsys, monkeypatch)["hookSpecificOutput"]["permissionDecision"] == "allow", \
+        "the shell environment wins over the plugin option"
+    monkeypatch.delenv("CODEATLAS_AUTO_APPROVE", raising=False)
+    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_AUTO_APPROVE", "${user_config.auto_approve}")
+    assert _run_hook(["pretool", "--prefix", prefix], ev, capsys, monkeypatch) is not None, "an unresolved placeholder means default"
+    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_AUTO_APPROVE", raising=False)
+    monkeypatch.delenv("CODEATLAS_GUARD", raising=False)
+    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_GUARD_MODE", "off")
+    assert _run_hook(["session-start"], {"cwd": str(repo), "source": "startup"}, capsys, monkeypatch) is None
+    assert _run_hook(["pretool", "--prefix", prefix], {"tool_name": "Grep", "tool_input": {"pattern": "handle", "path": str(repo)},
+                                                        "hook_event_name": "PreToolUse", "cwd": str(repo)}, capsys, monkeypatch) is None

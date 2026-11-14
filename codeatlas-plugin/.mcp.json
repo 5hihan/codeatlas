@@ -6,7 +6,10 @@
         "serve",
         "--repo",
         "${CLAUDE_PROJECT_DIR}"
-      ]
+      ],
+      "env": {
+        "CODEATLAS_DASHBOARD": "${user_config.dashboard}"
+      }
     }
   }
 }

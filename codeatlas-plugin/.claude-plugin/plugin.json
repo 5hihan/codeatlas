@@ -17,5 +17,25 @@
     "call-graph",
     "mcp",
     "snipe"
-  ]
+  ],
+  "userConfig": {
+    "guard_mode": {
+      "type": "string",
+      "title": "Guard mode",
+      "description": "default: deny built-in Grep/Glob, whole-file Read and in-declaration edits of indexed files and name the CodeAtlas call instead; search: only the search redirects; off: no guard.",
+      "default": "default"
+    },
+    "auto_approve": {
+      "type": "boolean",
+      "title": "Auto-approve read-only tools",
+      "description": "Approve CodeAtlas's read-only tools without a permission prompt (edits, SNIPE state changes and test runs always ask).",
+      "default": true
+    },
+    "dashboard": {
+      "type": "boolean",
+      "title": "Dashboard",
+      "description": "Serve the live dashboard on 127.0.0.1:8765 while the server runs.",
+      "default": true
+    }
+  }
 }

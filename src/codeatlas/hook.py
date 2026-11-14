@@ -269,6 +269,16 @@ task_context triggers unreferenced next_snipe get_snipe_context snipe_board snip
 """.split())
 
 
+def _option(env_name: str, option: str, default: str = "") -> str:
+    """A setting: the shell environment wins, then the plugin's userConfig (CLAUDE_PLUGIN_OPTION_<KEY>), then default."""
+    v = os.environ.get(env_name)
+    if v is None or v == "":
+        v = os.environ.get(f"CLAUDE_PLUGIN_OPTION_{option.upper()}")
+    if v is None or v == "" or v.startswith("${"):   # unresolved placeholder: behave as if unset
+        return default
+    return v
+
+
 def approve(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
     """The reason to auto-approve a CodeAtlas read-only tool call, or None.
 
@@ -276,7 +286,7 @@ def approve(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
     returns ``permissionDecision: "allow"`` skips that prompt. Only tools that read the index qualify: edits, SNIPE
     state changes and anything that runs tests keep the user's prompt.
     """
-    if os.environ.get("CODEATLAS_AUTO_APPROVE", "").lower() in ("off", "0", "false", "no"):
+    if _option("CODEATLAS_AUTO_APPROVE", "auto_approve", "on").lower() in ("off", "0", "false", "no"):
         return None
     tool = event.get("tool_name") or ""
     if not tool.startswith(prefix + "__"):
@@ -289,7 +299,7 @@ def approve(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
 
 def decide(event: dict, prefix: str = DEFAULT_PREFIX, mode: str = "default") -> Optional[str]:
     """Return a deny reason for this PreToolUse event, or None to let the call through."""
-    mode = (os.environ.get("CODEATLAS_GUARD") or mode or "default").lower()
+    mode = _option("CODEATLAS_GUARD", "guard_mode", mode or "default").lower()
     if mode == "off":
         return None
     full = mode != "search"
@@ -498,7 +508,7 @@ def session_context(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
     forgets how to work after compaction, so the same few lines return on ``startup``, ``resume``, ``clear`` and
     ``compact`` (shorter after compaction). Kept to a few hundred tokens: this is read on every session.
     """
-    if os.environ.get("CODEATLAS_GUARD", "").lower() == "off":
+    if _option("CODEATLAS_GUARD", "guard_mode", "default").lower() == "off":
         return None
     cwd = Path(event.get("cwd") or os.getcwd())
     from .roots import protected_reason

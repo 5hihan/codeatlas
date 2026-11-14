@@ -343,11 +343,25 @@ def write_plugin(target: Path) -> list[str]:
         "homepage": "https://github.com/5hihan/codeatlas",
         "repository": "https://github.com/5hihan/codeatlas",
         "keywords": ["code-intelligence", "tree-sitter", "code-map", "symbols", "call-graph", "mcp", "snipe"],
+        # `/plugin configure codeatlas@codeatlas` or `claude plugin install ... --config KEY=VALUE`; hooks read
+        # CLAUDE_PLUGIN_OPTION_<KEY>, the server reads the same values through its environment (.mcp.json env)
+        "userConfig": {
+            "guard_mode": {"type": "string", "title": "Guard mode",
+                           "description": "default: deny built-in Grep/Glob, whole-file Read and in-declaration edits of indexed "
+                                          "files and name the CodeAtlas call instead; search: only the search redirects; "
+                                          "off: no guard.", "default": "default"},
+            "auto_approve": {"type": "boolean", "title": "Auto-approve read-only tools",
+                             "description": "Approve CodeAtlas's read-only tools without a permission prompt (edits, SNIPE state "
+                                            "changes and test runs always ask).", "default": True},
+            "dashboard": {"type": "boolean", "title": "Dashboard",
+                          "description": "Serve the live dashboard on 127.0.0.1:8765 while the server runs.", "default": True},
+        },
     }
     files = {
         ".claude-plugin/plugin.json": json.dumps(manifest, indent=2) + "\n",
         ".mcp.json": json.dumps({"mcpServers": {"atlas": {
-            "command": "codeatlas", "args": ["serve", "--repo", "${CLAUDE_PROJECT_DIR}"]}}}, indent=2) + "\n",
+            "command": "codeatlas", "args": ["serve", "--repo", "${CLAUDE_PROJECT_DIR}"],
+            "env": {"CODEATLAS_DASHBOARD": "${user_config.dashboard}"}}}}, indent=2) + "\n",
         "skills/codeatlas/SKILL.md": SKILL,
         "hooks/hooks.json": json.dumps(plugin_hooks(PLUGIN_PREFIX), indent=2) + "\n",
         "README.md": ("# CodeAtlas plugin for Claude Code\n\nRequires the `codeatlas` command on PATH "

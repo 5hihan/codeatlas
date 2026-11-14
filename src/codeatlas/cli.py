@@ -48,7 +48,10 @@ def _atlas(repo: Path):
 # ------------------------------------------------------------------ commands
 def cmd_serve(args) -> None:
     from .server import serve
-    serve(_repo(args), watch=not args.no_watch, dashboard=not args.no_dashboard, port=args.port,
+    # CODEATLAS_DASHBOARD comes from the plugin's userConfig (`${user_config.dashboard}`); unresolved placeholders count as on
+    dash_env = os.environ.get("CODEATLAS_DASHBOARD", "").strip().lower()
+    dashboard = not args.no_dashboard and dash_env not in ("0", "false", "off", "no")
+    serve(_repo(args), watch=not args.no_watch, dashboard=dashboard, port=args.port,
           profile=args.profile or os.environ.get("CODEATLAS_PROFILE", "all"))
 
 
