@@ -72,9 +72,52 @@ def test_plugin_hooks_register_session_start_and_guard():
     h = plugin_hooks("mcp__plugin_codeatlas_atlas")["hooks"]
     ss = h["SessionStart"][0]
     assert ss["matcher"] == "startup|resume|clear|compact"
-    assert ss["hooks"][0]["command"] == "codeatlas hook session-start --prefix mcp__plugin_codeatlas_atlas"
+    assert ss["hooks"][0]["command"] == "codeatlas"
+    assert ss["hooks"][0]["args"] == ["hook", "session-start", "--prefix", "mcp__plugin_codeatlas_atlas"]
     assert ss["hooks"][0]["timeout"] <= 10
-    assert h["PreToolUse"][0]["hooks"][0]["command"].startswith("codeatlas hook pretool")
+    guard, approve_ = h["PreToolUse"]
+    assert guard["matcher"] == "Grep|Glob|Bash|Read|Edit|MultiEdit|Write"
+    assert guard["hooks"][0]["args"][:2] == ["hook", "pretool"] and "continueOnBlock" not in guard["hooks"][0]
+    assert approve_["matcher"] == "mcp__plugin_codeatlas_atlas__.*"
+    for entry in h["PreToolUse"] + h["SessionStart"]:
+        for hk in entry["hooks"]:
+            assert hk["command"] == "codeatlas" and isinstance(hk["args"], list), "exec form: no shell quoting"
+
+
+def test_auto_approve_read_only_tools_only(capsys, monkeypatch):
+    monkeypatch.delenv("CODEATLAS_AUTO_APPROVE", raising=False)
+    prefix = "mcp__plugin_codeatlas_atlas"
+    out = _run_hook(["pretool", "--prefix", prefix], {"tool_name": f"{prefix}__task_context", "tool_input": {"task": "x"},
+                                                      "hook_event_name": "PreToolUse", "cwd": "/"}, capsys, monkeypatch)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+    for name in ("replace_symbol", "insert_code", "rename_symbol", "claim_snipe", "verify_snipe", "snipe_add", "index_repo"):
+        assert _run_hook(["pretool", "--prefix", prefix], {"tool_name": f"{prefix}__{name}", "tool_input": {},
+                                                           "hook_event_name": "PreToolUse", "cwd": "/"}, capsys, monkeypatch) is None, name
+    # another server's tool, or the project-layout prefix, is not ours to approve
+    assert _run_hook(["pretool", "--prefix", prefix], {"tool_name": "mcp__other__task_context", "tool_input": {},
+                                                       "hook_event_name": "PreToolUse", "cwd": "/"}, capsys, monkeypatch) is None
+    monkeypatch.setenv("CODEATLAS_AUTO_APPROVE", "off")
+    assert _run_hook(["pretool", "--prefix", prefix], {"tool_name": f"{prefix}__task_context", "tool_input": {},
+                                                       "hook_event_name": "PreToolUse", "cwd": "/"}, capsys, monkeypatch) is None
+
+
+def test_read_only_tool_list_matches_server_annotations(repo: Path):
+    from codeatlas.server import App, build_server
+    app = App(repo, watch=False, dashboard=False)
+    with app._lock:
+        app.ix.update()
+    mcp = build_server(app)
+
+    async def go():
+        tools = await mcp.list_tools()
+        return {t.name for t in tools if t.annotations and t.annotations.read_only_hint}
+    assert asyncio.run(go()) == set(hook.READ_ONLY_TOOLS)
+    app.close()
+
+
+def test_hook_gates_exactly_the_indexed_languages():
+    from codeatlas.languages import EXT_TO_LANG
+    assert set(hook.SOURCE_EXT) == set(EXT_TO_LANG)
 
 
 def test_compact_outline_folds_big_files_only(tmp_path: Path):

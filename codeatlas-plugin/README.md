@@ -4,8 +4,10 @@ Requires the `codeatlas` command on PATH (`uv tool install codeatlas`). Load wit
 `/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to
 the `codeatlas-navigator`, `codeatlas-sniper` and `codeatlas-reviewer` agents.
 
-`hooks/hooks.json` installs two hooks. A SessionStart hook (startup, resume, /clear and after every compaction) injects a few
-lines of orientation: the index size and which tool to reach for first. A PreToolUse guard, in a repository that has a
+`hooks/hooks.json` installs three hooks. A SessionStart hook (startup, resume, /clear and after every compaction) injects a few
+lines of orientation: the index size and which tool to reach for first. A PreToolUse hook auto-approves CodeAtlas's own
+read-only tools (queries never prompt; edits, SNIPE state changes and test runs still ask; `CODEATLAS_AUTO_APPROVE=off`
+turns it off). A PreToolUse guard, in a repository that has a
 `.codeatlas/index.db`, for files the index
 knows, denies with a message naming the CodeAtlas tool to use instead:
 

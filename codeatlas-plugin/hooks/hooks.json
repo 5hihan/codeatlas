@@ -6,7 +6,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "codeatlas hook session-start --prefix mcp__plugin_codeatlas_atlas",
+            "command": "codeatlas",
+            "args": [
+              "hook",
+              "session-start",
+              "--prefix",
+              "mcp__plugin_codeatlas_atlas"
+            ],
             "timeout": 5
           }
         ]
@@ -18,9 +24,30 @@
         "hooks": [
           {
             "type": "command",
-            "command": "codeatlas hook pretool --prefix mcp__plugin_codeatlas_atlas",
-            "timeout": 10,
-            "continueOnBlock": true
+            "command": "codeatlas",
+            "args": [
+              "hook",
+              "pretool",
+              "--prefix",
+              "mcp__plugin_codeatlas_atlas"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_codeatlas_atlas__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "codeatlas",
+            "args": [
+              "hook",
+              "pretool",
+              "--prefix",
+              "mcp__plugin_codeatlas_atlas"
+            ],
+            "timeout": 5
           }
         ]
       }

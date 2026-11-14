@@ -83,7 +83,9 @@ open questions. Prefer three precise findings over ten vague ones. Do not edit c
 
 SKILL = """---
 name: codeatlas
-description: Navigate, understand and fix code in repositories indexed by CodeAtlas (tree-sitter code map, config/schema relationships, SNIPE fix loop). Use whenever the user asks where something is implemented, what calls what, what a change affects, which config/env/schema a symbol uses, or to fix a failing test or bug, instead of reading whole files.
+description: Navigate, understand and fix code in repositories indexed by CodeAtlas (tree-sitter code map, config/schema relationships, SNIPE fix loop). Use whenever the user asks where something is implemented, what calls what, how one piece of code reaches another, what a change affects, which config/env/schema a symbol uses, or to fix a failing test or bug, instead of reading whole files or grepping.
+when_to_use: where is X, what calls Y, how does A reach B, what breaks if Z changes, which env var / table / config does this use, explain how this feature flows, fix this failing test, find the bug
+allowed-tools: mcp__plugin_codeatlas_atlas__*
 ---
 
 # CodeAtlas
@@ -128,6 +130,7 @@ $ARGUMENTS
 description: Fix the next concrete issue (or the given issue id / failure) with the SNIPE loop
 argument-hint: [issue id, failure text, or empty for next_snipe]
 agent: codeatlas-sniper
+disable-model-invocation: true
 ---
 
 Run the SNIPE loop. Target: $ARGUMENTS
@@ -137,6 +140,7 @@ Run the SNIPE loop. Target: $ARGUMENTS
 description: Review the current change set with CodeAtlas blast radius (consumers, tests, config/schema)
 argument-hint: [base ref, default HEAD]
 agent: codeatlas-reviewer
+disable-model-invocation: true
 ---
 
 Review the changes versus base ref: $ARGUMENTS
@@ -205,16 +209,25 @@ def plugin_hooks(prefix: str) -> dict:
     session-start``) runs at startup, resume, /clear and after every compaction: the index size and which tool to
     reach for first, so the first call of a session is a CodeAtlas call and the habit survives compaction.
     """
+    # exec form (command + args): each argument is passed as-is, no shell quoting, same on every platform
     return {"hooks": {
         "SessionStart": [{
             "matcher": "startup|resume|clear|compact",
-            "hooks": [{"type": "command", "command": f"codeatlas hook session-start --prefix {prefix}", "timeout": 5}],
+            "hooks": [{"type": "command", "command": "codeatlas",
+                       "args": ["hook", "session-start", "--prefix", prefix], "timeout": 5}],
         }],
-        "PreToolUse": [{
-            "matcher": "Grep|Glob|Bash|Read|Edit|MultiEdit|Write",
-            "hooks": [{"type": "command", "command": f"codeatlas hook pretool --prefix {prefix}",
-                       "timeout": 10, "continueOnBlock": True}],
-        }],
+        "PreToolUse": [
+            {   # the guard: built-in search / whole-file reads / in-declaration edits of indexed files
+                "matcher": "Grep|Glob|Bash|Read|Edit|MultiEdit|Write",
+                "hooks": [{"type": "command", "command": "codeatlas",
+                           "args": ["hook", "pretool", "--prefix", prefix], "timeout": 10}],
+            },
+            {   # the same handler auto-approves CodeAtlas's own read-only tools: no permission prompt for a query
+                "matcher": f"{prefix}__.*",
+                "hooks": [{"type": "command", "command": "codeatlas",
+                           "args": ["hook", "pretool", "--prefix", prefix], "timeout": 5}],
+            },
+        ],
     }}
 
 
@@ -341,8 +354,10 @@ def write_plugin(target: Path) -> list[str]:
                       "(`uv tool install codeatlas`). Load with `claude --plugin-dir <this dir>` or install it, then use\n"
                       "`/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to\n"
                       "the `codeatlas-navigator`, `codeatlas-sniper` and `codeatlas-reviewer` agents.\n\n"
-                      "`hooks/hooks.json` installs two hooks. A SessionStart hook (startup, resume, /clear and after every "
+                      "`hooks/hooks.json` installs three hooks. A SessionStart hook (startup, resume, /clear and after every "
                       "compaction) injects a few\nlines of orientation: the index size and which tool to reach for first. "
+                      "A PreToolUse hook auto-approves CodeAtlas's own\nread-only tools (queries never prompt; edits, SNIPE "
+                      "state changes and test runs still ask; `CODEATLAS_AUTO_APPROVE=off`\nturns it off). "
                       "A PreToolUse guard, in a repository that has a\n`.codeatlas/index.db`, "
                       "for files the index\nknows, denies with a message naming the CodeAtlas tool to use instead:\n\n"
                       "- Grep/Glob and `grep`/`rg`/`find` in any Bash statement -> `grep`, `find_symbols`, `references`, "

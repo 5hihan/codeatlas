@@ -2,6 +2,7 @@
 description: Fix the next concrete issue (or the given issue id / failure) with the SNIPE loop
 argument-hint: [issue id, failure text, or empty for next_snipe]
 agent: codeatlas-sniper
+disable-model-invocation: true
 ---
 
 Run the SNIPE loop. Target: $ARGUMENTS

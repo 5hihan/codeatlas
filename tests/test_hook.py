@@ -265,6 +265,8 @@ def test_plugin_ships_the_hook(tmp_path: Path):
     from codeatlas import agents
     agents.write_plugin(tmp_path)
     hooks = json.loads((tmp_path / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-    (entry,) = hooks["hooks"]["PreToolUse"]
+    entry, approve = hooks["hooks"]["PreToolUse"]
     assert all(t in entry["matcher"] for t in ("Grep", "Glob", "Bash", "Read", "Edit", "MultiEdit", "Write"))
-    assert entry["hooks"][0]["command"] == f"codeatlas hook pretool --prefix {P}"
+    assert entry["hooks"][0]["command"] == "codeatlas"
+    assert entry["hooks"][0]["args"] == ["hook", "pretool", "--prefix", P]
+    assert approve["matcher"] == f"{P}__.*" and approve["hooks"][0]["args"][:2] == ["hook", "pretool"]

@@ -22,23 +22,23 @@ from .watcher import Watcher
 
 log = logging.getLogger("codeatlas")
 
-INSTRUCTIONS = """CodeAtlas gives you a tree-sitter map of this repository so you do NOT need to read whole files.
-Start a task with task_context("<what you are doing>", scope="dir/"): it returns the relevant
-symbols with source, callers, tests and config in one call. It remembers what you looked at in this session
-(symbol, symbol_source, file_outline, references, edits) and ranks results by how they connect to it, showing the
-route (main --calls@4--> handle --calls@5--> process); pass known=[...] to name what you understand, known=[] to
-start fresh. connections(target, known) answers "how does A reach B" with every hop anchored to path:line.
-Then: find_symbols / file_outline to locate -> symbol
-(callers, callees, signature) -> symbol_source for just the lines you need -> impact / triggers / references before
-changing anything. change_context(base_ref) summarises what you changed and which consumers/tests to re-check.
-relationships(path) traces code/config/schema dependencies. programming_patterns(path) explains detected
-language constructs at source locations; outlines and task context include compact hints automatically.
-task_context, repo_map and change_context adapt their context budget to scope and relevant evidence; set token_budget to override.
-Edit precisely with replace_symbol / insert_code (they re-index immediately). The index auto-updates on every file change.
-Fix work runs the SNIPE loop (Scan, Narrow, Infer, Patch, Evaluate): next_snipe -> claim_snipe ->
+INSTRUCTIONS = """Use these tools instead of Grep, Glob, Read and Edit on this repository's indexed source files: CodeAtlas
+holds a tree-sitter map of it (symbols, references, call graph, imports, env keys, SQL tables) and answers in
+compact text with path:line anchors. Entry points: task_context("<what you are doing>", scope="dir/") to start a
+task (relevant symbols with source, callers, tests, config, and the routes from what you already looked at);
+find_symbols / file_outline to locate; symbol (callers, callees) and symbol_source (just the lines you need) to
+read; connections(target, known) for how code you know reaches code you need; references / impact / triggers
+before changing anything; replace_symbol / insert_code to edit (parse-checked, re-indexed at once).
+task_context remembers what you looked at in this session (symbol, symbol_source, file_outline, references, edits)
+and ranks results by how they connect to it; pass known=[...] to name what you understand, known=[] to start fresh.
+change_context(base_ref) summarises what you changed and which consumers/tests to re-check. relationships(path)
+traces code/config/schema dependencies. programming_patterns(path) explains detected language constructs.
+task_context, repo_map and change_context adapt their budget to scope and evidence; set token_budget to override.
+Big files come back summarised from file_outline (full=True lists everything). The index updates itself on every
+file change. Fix work runs the SNIPE loop (Scan, Narrow, Infer, Patch, Evaluate): next_snipe -> claim_snipe ->
 get_snipe_context (level 1, climb only if needed) -> patch the smallest surface -> verify_snipe -> next_snipe.
 Feed failures with snipe_report; snipe_scan finds concrete problems; opportunities stay dormant. Never widen a
-snipe into a refactor. All outputs are compact text with path:line anchors."""
+snipe into a refactor."""
 
 
 # Tools kept in Claude's context from the start (Claude Code defers the other MCP tool schemas behind a search):

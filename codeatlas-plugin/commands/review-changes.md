@@ -2,6 +2,7 @@
 description: Review the current change set with CodeAtlas blast radius (consumers, tests, config/schema)
 argument-hint: [base ref, default HEAD]
 agent: codeatlas-reviewer
+disable-model-invocation: true
 ---
 
 Review the changes versus base ref: $ARGUMENTS

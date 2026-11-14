@@ -22,6 +22,10 @@ Usage (hooks.json / settings.json)::
     codeatlas hook session-start [--prefix ...]   SessionStart: a few lines of orientation (index size, which
                                                   tool to reach for) injected at startup, resume and after compaction
 
+The same PreToolUse handler also auto-approves CodeAtlas's own read-only tools (READ_ONLY_TOOLS): a query of the
+index never needs a permission prompt, while edits, SNIPE state changes and test runs keep asking.
+CODEATLAS_AUTO_APPROVE=off turns that off.
+
 * ``default`` gates, for the indexed repository only:
   - ``Grep``/``Glob`` and ``grep``/``rg``/``find`` in any Bash statement -> grep / find_symbols / references / list_files
   - whole-file ``Read`` (no limit, or over READ_MAX_LINES) and ``cat`` in Bash -> file_outline / symbol_source
@@ -48,9 +52,11 @@ SEARCH_CMDS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "ug", "ugrep", "git-
 LIST_CMDS = {"find", "fd", "fdfind"}
 CAT_CMDS = {"cat", "bat", "type", "less", "more"}  # whole-file dumps; head/tail/sed -n are partial and pass
 INPLACE_CMDS = {"sed", "gsed", "perl", "awk"}      # with -i: in-place rewrite
-# languages the indexer parses; anything else (docs, json, lock files) is never gated
-SOURCE_EXT = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".go", ".rs", ".java", ".kt", ".kts", ".swift",
-              ".c", ".h", ".cpp", ".cc", ".hpp", ".cs", ".rb", ".php", ".scala", ".lua", ".dart", ".m", ".mm"}
+# languages the indexer parses; anything else (docs, json, lock files) is never gated. Derived from the language
+# table so the guard and the index always agree (languages.py imports nothing heavy; grammars load lazily).
+from .languages import EXT_TO_LANG  # noqa: E402
+
+SOURCE_EXT = frozenset(EXT_TO_LANG)
 # an Edit inside a declaration up to this long is sent through replace_symbol; longer ones may use Edit
 EDIT_SYMBOL_MAX_LINES = 150
 # a Read of an indexed file must be a bounded window: an explicit limit of at most this many lines
@@ -253,6 +259,32 @@ def bash_search(command: str) -> Optional[str]:
 
 
 # ------------------------------------------------------------------ decisions
+# CodeAtlas tools that only read the index: approved without a prompt (kept in sync with server.py by a test)
+READ_ONLY_TOOLS = frozenset("""
+change_context connections dependencies file_outline find_symbols findings grep hotspots impact index_status
+list_files module_graph programming_patterns references relationships repo_map repo_overview symbol symbol_source
+task_context triggers unreferenced next_snipe get_snipe_context snipe_board snipe_list snipe_item
+""".split())
+
+
+def approve(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
+    """The reason to auto-approve a CodeAtlas read-only tool call, or None.
+
+    Claude Code asks before the first use of every MCP tool unless a permission rule allows it; a hook that
+    returns ``permissionDecision: "allow"`` skips that prompt. Only tools that read the index qualify: edits, SNIPE
+    state changes and anything that runs tests keep the user's prompt.
+    """
+    if os.environ.get("CODEATLAS_AUTO_APPROVE", "").lower() in ("off", "0", "false", "no"):
+        return None
+    tool = event.get("tool_name") or ""
+    if not tool.startswith(prefix + "__"):
+        return None
+    name = tool[len(prefix) + 2:]
+    if name in READ_ONLY_TOOLS:
+        return f"CodeAtlas {name} only reads the index"
+    return None
+
+
 def decide(event: dict, prefix: str = DEFAULT_PREFIX, mode: str = "default") -> Optional[str]:
     """Return a deny reason for this PreToolUse event, or None to let the call through."""
     mode = (os.environ.get("CODEATLAS_GUARD") or mode or "default").lower()
@@ -527,10 +559,14 @@ def run(argv: Optional[list[str]] = None) -> int:
                                                                 "additionalContext": text}}))
         return 0
     try:
-        reason = decide(event, ns.prefix, ns.mode or "default")
+        ok = approve(event, ns.prefix)
+        reason = None if ok else decide(event, ns.prefix, ns.mode or "default")
     except Exception:
         return 0
-    if reason:
+    if ok:
+        sys.stdout.write(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": ok}}))
+    elif reason:
         sys.stdout.write(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
     return 0

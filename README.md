@@ -218,7 +218,9 @@ instructions at session start. CodeAtlas works with that: the six tools an agent
 list), every navigation tool carries `readOnlyHint`/`idempotentHint` so Claude Code runs them in parallel with other
 read-only calls, and the server instructions stay inside the 4,096-character cap. A SessionStart hook adds about 270
 tokens of orientation (index size, which tool to reach for) at startup, resume and `/clear`, and a 125-token reminder
-after every compaction, when models otherwise forget the index exists. `codeatlas-plugin/evals/` holds
+after every compaction, when models otherwise forget the index exists. A PreToolUse hook auto-approves CodeAtlas's
+own read-only tools, so a query of the index never shows a permission prompt; edits, SNIPE state changes and anything
+that runs tests still ask (`CODEATLAS_AUTO_APPROVE=off` turns the approval off). `codeatlas-plugin/evals/` holds
 `claude plugin eval` cases (a navigation question that must be answered with path:line evidence through CodeAtlas
 tools, and a non-code question that must not call them) so the with/without-plugin delta can be measured on every
 change.
