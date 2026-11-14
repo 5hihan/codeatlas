@@ -21,9 +21,9 @@ import os
 import re
 import time
 from collections import defaultdict
-from typing import Optional
+from typing import Iterable, Optional
 
-from .graph import Atlas, is_test_path
+from .graph import Atlas, is_example_path, is_test_path
 from .indexer import Index
 from .rank import ensure_rank, estimate_tokens
 from .budgeting import plan_context
@@ -40,13 +40,150 @@ FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(symbol_id UNINDEXED, name, words, signature, doc, path,
   pathwords, tokenize='unicode61');
 """
+FTS_SCHEMA_VERSION = "2"   # bump when the indexed text changes shape (stems, directory words)
 
 DOC_EXT = (".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml", ".env", ".ini", ".cfg", ".sql", ".graphql", ".proto")
+# directory names that say nothing about what the code does
+_PATHWORD_IGNORE = frozenset("src lib app apps pkg pkgs internal main java com org io net js ts py index mod".split())
+# items below this fraction of the best score are a long lexical tail (shown only while the budget is unused)
+TAIL_CUTOFF = 0.2
+MIN_ITEMS = 8
+# scoring weights (tuned on the benchmark corpora: see the development notes in README)
+COVERAGE_WEIGHT = 0.6     # per task term the symbol's own text covers
+RANK_WEIGHT = 2.0         # PageRank boost: 1 + RANK_WEIGHT * sqrt(rank / max_rank)
+TEST_FACTOR = 0.4
+EXAMPLE_FACTOR = 0.5
+# "how does X work" is usually answered by callable code; types, constants and properties are reached from it
+KIND_FACTORS = {"interface": 0.75, "type": 0.75, "enum": 0.8, "constant": 0.7, "variable": 0.7, "property": 0.7}
+PRIVATE_FACTOR = 0.8      # private helpers are reached through their public callers
+FILE_DIVERSITY = 0.75     # the k-th candidate from one file counts FILE_DIVERSITY**k: spread the answer, outline the rest
+PATH_TERM_WEIGHT = 0.5    # per task term that names the symbol's module (directory or file): "dependencies" -> fastapi/dependencies/
 
 
 def split_words(s: str) -> list[str]:
     parts = re.split(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", s)
     return [p.lower() for p in parts if p]
+
+
+# ---- a compact Porter stemmer: `dependencies`, `dependant` and `depends` all become `depend`, `resolved`
+# and `resolve` become `resolv`, so task words meet identifier words without a dictionary
+def _cons(w: str, i: int) -> bool:
+    c = w[i]
+    if c in "aeiou":
+        return False
+    if c == "y":
+        return i == 0 or not _cons(w, i - 1)
+    return True
+
+
+def _measure(w: str) -> int:
+    n = i = 0
+    L = len(w)
+    while i < L and _cons(w, i):
+        i += 1
+    while i < L:
+        while i < L and not _cons(w, i):
+            i += 1
+        if i >= L:
+            break
+        n += 1
+        while i < L and _cons(w, i):
+            i += 1
+    return n
+
+
+def _vowel_in(w: str) -> bool:
+    return any(not _cons(w, i) for i in range(len(w)))
+
+
+def _cvc(w: str) -> bool:
+    L = len(w)
+    return L >= 3 and _cons(w, L - 3) and not _cons(w, L - 2) and _cons(w, L - 1) and w[-1] not in "wxy"
+
+
+_STEP2 = (("ational", "ate"), ("tional", "tion"), ("enci", "ence"), ("anci", "ance"), ("izer", "ize"), ("bli", "ble"),
+          ("alli", "al"), ("entli", "ent"), ("eli", "e"), ("ousli", "ous"), ("ization", "ize"), ("ation", "ate"),
+          ("ator", "ate"), ("alism", "al"), ("iveness", "ive"), ("fulness", "ful"), ("ousness", "ous"), ("aliti", "al"),
+          ("iviti", "ive"), ("biliti", "ble"), ("logi", "log"))
+_STEP3 = (("icate", "ic"), ("ative", ""), ("alize", "al"), ("iciti", "ic"), ("ical", "ic"), ("ful", ""), ("ness", ""))
+_STEP4 = ("al", "ance", "ence", "er", "ic", "able", "ible", "ant", "ement", "ment", "ent", "ion", "ou", "ism", "ate",
+          "iti", "ous", "ive", "ize")
+
+
+def stem(word: str) -> str:
+    w = word.lower()
+    if len(w) <= 2 or not w.isalpha():
+        return w
+    # 1a
+    if w.endswith("sses"):
+        w = w[:-2]
+    elif w.endswith("ies"):
+        w = w[:-2]
+    elif w.endswith("ss"):
+        pass
+    elif w.endswith("s"):
+        w = w[:-1]
+    # 1b
+    if w.endswith("eed"):
+        if _measure(w[:-3]) > 0:
+            w = w[:-1]
+    else:
+        for suf in ("ed", "ing"):
+            if w.endswith(suf) and _vowel_in(w[:-len(suf)]):
+                w = w[:-len(suf)]
+                if w.endswith(("at", "bl", "iz")):
+                    w += "e"
+                elif len(w) >= 2 and w[-1] == w[-2] and _cons(w, len(w) - 1) and w[-1] not in "lsz":
+                    w = w[:-1]
+                elif _measure(w) == 1 and _cvc(w):
+                    w += "e"
+                break
+    # 1c
+    if w.endswith("y") and _vowel_in(w[:-1]):
+        w = w[:-1] + "i"
+    # 2, 3
+    for table in (_STEP2, _STEP3):
+        for suf, rep_ in table:
+            if w.endswith(suf):
+                base = w[:-len(suf)]
+                if _measure(base) > 0:
+                    w = base + rep_
+                break
+    # 4
+    for suf in _STEP4:
+        if w.endswith(suf):
+            base = w[:-len(suf)]
+            if _measure(base) > 1 and (suf != "ion" or base.endswith(("s", "t"))):
+                w = base
+            break
+    # 5
+    if w.endswith("e"):
+        base = w[:-1]
+        m = _measure(base)
+        if m > 1 or (m == 1 and not _cvc(base)):
+            w = base
+    if len(w) >= 2 and w.endswith("ll") and _measure(w) > 1:
+        w = w[:-1]
+    return w
+
+
+def stems_of(words: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    for w in words:
+        st = stem(w)
+        if st and st not in out:
+            out.append(st)
+    return out
+
+
+def path_words(path: str) -> list[str]:
+    """Words of the file name and of its directories (stemmed), so a task about "dependencies" meets
+    ``fastapi/dependencies/utils.py``."""
+    parts = path.split("/")
+    words = split_words(parts[-1].rsplit(".", 1)[0])
+    for d in parts[:-1]:
+        words += [w for w in split_words(d) if w not in _PATHWORD_IGNORE and w not in STOP and len(w) > 1]
+    return stems_of(words)
 
 
 def terms_from(task: str) -> list[str]:
@@ -68,10 +205,10 @@ def ensure_fts(ix: Index) -> None:
     with ix.lock:
         c.executescript(FTS_SCHEMA)
         ver = ix.get_meta("last_update") or "0"
-        if ix.get_meta("fts_version") == ver:
+        if ix.get_meta("fts_version") == ver and ix.get_meta("fts_schema") == FTS_SCHEMA_VERSION:
             return
         cols = {r[1] for r in c.execute("PRAGMA table_info(symbols_fts)")}
-        if "pathwords" not in cols:
+        if "pathwords" not in cols or ix.get_meta("fts_schema") != FTS_SCHEMA_VERSION:
             c.execute("DROP TABLE IF EXISTS symbols_fts")
             c.executescript(FTS_SCHEMA)
         c.execute("DELETE FROM symbols_fts")
@@ -79,9 +216,10 @@ def ensure_fts(ix: Index) -> None:
                          "JOIN files f ON f.id=s.file_id").fetchall()
         c.executemany("INSERT INTO symbols_fts(symbol_id, name, words, signature, doc, path, pathwords) "
                       "VALUES(?,?,?,?,?,?,?)",
-                      [(r[0], r[1], " ".join(split_words(r[2])), (r[3] or "")[:300], (r[4] or "")[:400], r[5],
-                        " ".join(split_words(r[5].rsplit('/', 1)[-1]))) for r in rows])
+                      [(r[0], r[1], " ".join(stems_of(split_words(r[2]))), (r[3] or "")[:300], (r[4] or "")[:400], r[5],
+                        " ".join(path_words(r[5]))) for r in rows])
         ix.set_meta("fts_version", ver)
+        ix.set_meta("fts_schema", FTS_SCHEMA_VERSION)
         c.commit()
 
 
@@ -106,13 +244,27 @@ def _pattern_hints(task: str) -> list[str]:
 
 
 def _fts_query(terms: list[str]) -> str:
+    """Stemmed terms, as exact tokens and as prefixes (``depend*`` meets dependency, dependencies, dependant)."""
     parts = []
+    seen = set()
     for t in terms:
-        t = re.sub(r"[^a-z0-9_]", "", t)
-        if not t:
+        t = re.sub(r"[^a-z0-9_]", "", stem(t))
+        if not t or t in seen:
             continue
+        seen.add(t)
         parts.append(f'"{t}"' if len(t) < 4 else f'("{t}" OR {t}*)')
     return " OR ".join(parts)
+
+
+def _covered(terms: list[str], own: str) -> int:
+    """How many task terms the symbol's own text covers, comparing stems (``resolved`` covers ``resolve``)."""
+    own_stems = set(stems_of(split_words(own)))
+    n = 0
+    for t in terms:
+        st = stem(t)
+        if t in own or st in own_stems or any(w.startswith(st) for w in own_stems if len(st) >= 4):
+            n += 1
+    return n
 
 
 def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None, token_budget: Optional[int] = None,
@@ -154,15 +306,36 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     rank_rows = {r[0]: r[1] for r in c.execute("SELECT symbol_id, rank FROM symbol_rank")}
     max_rank = max(rank_rows.values(), default=1.0) or 1.0
     exact = {t for t in terms}
+    term_stems = {stem(t) for t in terms if len(stem(t)) >= 3}
+    meta: dict[int, tuple[str, int]] = {}
+    ids = [r[0] for r in rows]
+    for i in range(0, len(ids), 400):
+        chunk = ids[i:i + 400]
+        meta.update({r[0]: (r[1], r[2]) for r in c.execute(
+            "SELECT id, kind, exported FROM symbols WHERE id IN (%s)" % ",".join("?" * len(chunk)), chunk)})
     for sid, bm, path, nm, words, sig, doc in rows:
         s = -bm  # bm25: smaller is better (negative)
-        s *= 0.4 if is_test_path(path) else 1.0
-        # coverage: how many distinct task terms appear in the symbol's own text (name/signature/doc)
+        if is_test_path(path):
+            s *= TEST_FACTOR
+        elif is_example_path(path):
+            s *= EXAMPLE_FACTOR  # docs samples / benchmarks / fixtures: real code, rarely the subject of a task
+        kind, exported = meta.get(sid, ("", 1))
+        s *= KIND_FACTORS.get(kind, 1.0)
+        if not exported:
+            s *= PRIVATE_FACTOR
+        # the task names the module itself ("dependencies" -> fastapi/dependencies/, "jsx renderer" -> jsx-renderer/);
+        # examples and tests are organised by topic too, but they are not where the behaviour lives
+        pw = set(path_words(path)) if not (is_test_path(path) or is_example_path(path)) else set()
+        named = sum(1 for t in term_stems if t in pw)
+        if named:
+            s *= 1.0 + PATH_TERM_WEIGHT * min(2, named)
+            reasons[sid].append("in the module the task names")
+        # coverage: how many distinct task terms the symbol's own text (name/signature/doc) covers
         own = f"{nm} {words} {sig} {doc}".lower()
-        covered = sum(1 for t in terms if t in own)
-        s *= 1.0 + 0.6 * covered
+        covered = _covered(terms, own)
+        s *= 1.0 + COVERAGE_WEIGHT * covered
         scores[sid] += s
-        reasons[sid].append(f"matches {covered} task term(s)" if covered else "matches file name")
+        reasons[sid].append(f"matches {covered} task term(s)" if covered else "matches path")
     # exact-name matches get a strong boost
     for t in exact:
         for r in c.execute("SELECT s.id, f.path FROM symbols s JOIN files f ON f.id=s.file_id WHERE lower(s.name)=?" +
@@ -226,7 +399,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         result["notes"].append("no symbols matched; try broader terms or a different scope")
     # rank boost (+ hot graph: recently changed / active symbols)
     for sid in list(scores):
-        scores[sid] *= 1.0 + 2.0 * (rank_rows.get(sid, 0.0) / max_rank) ** 0.5
+        scores[sid] *= 1.0 + RANK_WEIGHT * (rank_rows.get(sid, 0.0) / max_rank) ** 0.5
         if boost:
             s = atlas.symbol_by_id(sid)
             if s and s["qualified"] in boost:
@@ -280,7 +453,23 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 reasons[t["id"]].append(f"called by {atlas.symbol_by_id(sid)['qualified']}")
 
     # ---- 3. tests & docs -------------------------------------------------------------
-    top = sorted(scores, key=lambda s: -scores[s])[:max_symbols]
+    ranked = sorted(scores, key=lambda s: -scores[s])
+    # spread the answer over files: the k-th candidate from one file counts FILE_DIVERSITY**k (an outline of that
+    # file shows its siblings anyway), so a hub file cannot fill the whole list with near-duplicates
+    if FILE_DIVERSITY < 1.0:
+        per_file: dict[str, int] = defaultdict(int)
+        adjusted: dict[int, float] = {}
+        for sid in ranked:
+            s = atlas.symbol_by_id(sid)
+            path = s["path"] if s else ""
+            adjusted[sid] = scores[sid] * (FILE_DIVERSITY ** per_file[path])
+            per_file[path] += 1
+        ranked.sort(key=lambda x: -adjusted[x])
+        scores.update(adjusted)
+    # a long tail of weak lexical matches costs tokens and dilutes the answer: keep the head, then only
+    # candidates still within TAIL_CUTOFF of the best score
+    best = scores[ranked[0]] if ranked else 0.0
+    top = [sid for i, sid in enumerate(ranked[:max_symbols]) if i < MIN_ITEMS or scores[sid] >= best * TAIL_CUTOFF]
     bridge_ids: set[int] = set()
     if anchor_ids:
         # the agent already has these: do not spend the budget repeating them
@@ -314,9 +503,9 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         for path, line in c.execute(q, tuple(names)):
             if is_test_path(path):
                 tests[path].add(line)
-    result["tests"] = [{"path": p, "lines": sorted(ls)[:8], "hits": len(ls)} for p, ls in
-                       sorted(tests.items(), key=lambda kv: -len(kv[1]))[:8]]
-    result["docs"] = _docs_mentioning(ix, terms[:8], scope, limit=6)
+    result["tests"] = [{"path": p, "lines": sorted(ls)[:6], "hits": len(ls)} for p, ls in
+                       sorted(tests.items(), key=lambda kv: -len(kv[1]))[:6]]
+    result["docs"] = _docs_mentioning(ix, terms[:8], scope, limit=4)
 
     # Reserve dependency evidence and tests before adding optional source bodies.
     selected = {sid: atlas.symbol_by_id(sid) for sid in top}
@@ -414,8 +603,8 @@ def _docs_mentioning(ix: Index, terms: list[str], scope: str, limit: int = 6) ->
             for i, ln in enumerate(lines, 1):
                 if rx.search(ln):
                     n += 1
-                    if len(snippets) < 3:
-                        snippets.append(f"{i}: {ln.strip()[:120]}")
+                    if len(snippets) < 2:
+                        snippets.append(f"{i}: {ln.strip()[:100]}")
             if n:
                 hits.append((n, os.path.relpath(p, root).replace("\\", "/"), snippets))
     hits.sort(key=lambda h: -h[0])
@@ -461,14 +650,14 @@ def render(r: dict) -> str:
         add(f"note: {note}")
     # Signatures and expansion handles remain visible even when bodies do not fit.
     if r["items"]:
-        add(f"\n## Relevant symbols ({len(r['items'])} of {r.get('symbols_considered', 0)} considered)")
+        add(f"\n## Relevant symbols ({len(r['items'])} of {r.get('symbols_considered', 0)} considered; "
+            f"expand: symbol_source(\"<qualified>\", path=\"<path>\"))")
         for it in r["items"]:
             block = f"{it['kind']} {it['qualified']}  {it['path']}:{it['start_line']}-{it['end_line']}  [{it['why']}]"
-            if it["signature"]:
+            if it["signature"] and it["signature"].strip() != it["qualified"]:
                 block += f"\n  {it['signature']}"
             if it["doc"]:
                 block += f"\n  doc: {it['doc']}"
-            block += f"\n  expand: {it['expand']}"
             add(block)
     if r.get("paths") or r.get("unreached"):
         from .connect import format_route_tree, _node_text, PROXIMITY_MAX_HOPS

@@ -33,8 +33,17 @@ TRIGGER_CALL_RE = re.compile(
     r"DispatchQueue|sink|assign|onReceive|onAppear|onTapGesture|handle|handler|callback|cb)$", re.I)
 
 
+EXAMPLE_HINT = re.compile(r"(^|/)(docs?|docs_src|documentation|examples?|samples?|demos?|benchmarks?|bench|perf|"
+                          r"perf-measures|fixtures?|playground|tutorials?|snippets?|sandbox)(/|$)", re.I)
+
+
 def is_test_path(path: str) -> bool:
     return bool(TEST_HINT.search(path))
+
+
+def is_example_path(path: str) -> bool:
+    """Documentation samples, examples, benchmarks, fixtures: real code, but rarely what a task is about."""
+    return bool(EXAMPLE_HINT.search(path))
 
 
 class Atlas:

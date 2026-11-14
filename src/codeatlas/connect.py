@@ -33,7 +33,7 @@ from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-from .graph import Atlas, is_test_path
+from .graph import Atlas, is_example_path, is_test_path
 from .indexer import Index
 from .rank import ensure_rank
 
@@ -44,7 +44,7 @@ COST = {"call": 1.0, "new": 1.0, "arg": 1.1, "ref": 1.7, "import": 1.8,
         "file_import": 1.5, "defines": 1.6, "contains": 0.8, "relationship": 1.5}
 CONF_MULT = {"high": 1.0, "medium": 1.25, "low": 2.2}
 FLIP_PENALTY = 0.5
-TEST_PENALTY = 0.8       # stepping from production code into a test: tests call everything, so they are weak glue
+TEST_PENALTY = 0.8       # stepping from production code into a test or example: they call everything, so weak glue
 HUB_PENALTY_MAX = 2.0
 # edges with a data/control-flow direction; containment and membership never flip a route
 FLOW_KINDS = frozenset({"call", "new", "arg", "ref", "import", "file_import"})
@@ -103,6 +103,7 @@ class Graph:
         self._nbrs: dict[Node, list[tuple[Node, Edge, bool]]] = {}
         self._deg: Optional[dict[Node, int]] = None
         self._is_test: dict[Node, bool] = {}
+        self._fanout: dict[Node, int] = {}   # top-level symbols per file / members per class
         self.truncated_nodes = 0
         tables = {r[0] for r in self.c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self._has_rel = "ca_relationships" in tables
@@ -172,10 +173,27 @@ class Graph:
     def hub_penalty(self, node: Node) -> float:
         return hub_penalty(self.degree(node))
 
+    def container_cost(self, node: Node, base: float) -> float:
+        """Containment is weaker evidence the bigger the container: sharing a 2,000-line file with 160 symbols
+        says little, sharing a 60-line file says a lot."""
+        if node not in self._fanout:
+            t, key = node
+            if t == "f":
+                n = self.c.execute("SELECT COUNT(*) FROM symbols WHERE file_id=? AND parent_id IS NULL", (key,)).fetchone()[0]
+            elif t == "s":
+                n = self.c.execute("SELECT COUNT(*) FROM symbols WHERE parent_id=?", (key,)).fetchone()[0]
+            else:
+                n = 0
+            self._fanout[node] = n
+        n = self._fanout[node]
+        return base + (0.35 * math.log2(n / 8) if n > 8 else 0.0)
+
     def is_test(self, node: Node) -> bool:
+        """Test, example, benchmark or docs code: weak glue between production symbols."""
         if node not in self._is_test:
             d = self.describe(node)
-            self._is_test[node] = bool(d.get("path")) and is_test_path(d["path"])
+            path = d.get("path") or ""
+            self._is_test[node] = bool(path) and (is_test_path(path) or is_example_path(path))
         return self._is_test[node]
 
     # ------------------------------------------------------------------ neighbours
@@ -356,6 +374,9 @@ def explore(graph: Graph, anchors: Iterable[tuple[Node, str]], *, max_cost: floa
             if other in blocked:
                 continue
             step = edge.cost
+            if edge.kind in ("defines", "contains"):
+                # the container is `node` when forward (file --defines--> symbol), else `other`
+                step = graph.container_cost(node if forward else other, step)
             ndir = direction
             if edge.kind in FLOW_KINDS:
                 d = 1 if forward else -1

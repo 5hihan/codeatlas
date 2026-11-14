@@ -118,7 +118,7 @@ attributed to an unrelated repository symbol.
 
 | Tool | Gives the agent |
 |---|---|
-| `task_context` | **start here**: the symbols relevant to a task (BM25 + PageRank + graph proximity + pattern hints), source for the strongest ones, tests, config/docs, inside an adaptive token budget; each item says why it is there and how to expand it. `known=[...]` (or, by default, what the agent looked at in this session) re-ranks results by how they connect to that code and renders the route to each one |
+| `task_context` | **start here**: the symbols relevant to a task (stemmed BM25 over names, signatures, docs and module names + PageRank + graph proximity + pattern hints; tests, examples and private helpers weighed down, results spread across files), source for the strongest ones, tests, config/docs, inside an adaptive token budget; each item says why it is there. `known=[...]` (or, by default, what the agent looked at in this session) re-ranks results by how they connect to that code and renders the route to each one |
 | `connections` | **how what you know reaches what you want**: shortest labelled routes from known symbols/files to a target through calls, callback registrations, class membership, file containment, imports and env/table/config relationships, every hop a `path:line`; alternative routes, the symbols on the way, and an honest "no route within N hops" |
 | `repo_overview`, `repo_map` | languages, packages, hubs, entry points; the complete symbol map, files ordered by PageRank (pass `token_budget` to get only the top-ranked part) |
 | `file_outline`, `find_symbols`, `symbol`, `symbol_source` | outlines with reference counts and pattern tags; signature, doc, callers, callees; just the lines of one symbol |
