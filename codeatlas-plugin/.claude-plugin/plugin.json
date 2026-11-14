@@ -7,5 +7,15 @@
     "name": "CodeAtlas"
   },
   "license": "MIT",
-  "homepage": "https://github.com/5hihan/codeatlas"
+  "homepage": "https://github.com/5hihan/codeatlas",
+  "repository": "https://github.com/5hihan/codeatlas",
+  "keywords": [
+    "code-intelligence",
+    "tree-sitter",
+    "code-map",
+    "symbols",
+    "call-graph",
+    "mcp",
+    "snipe"
+  ]
 }

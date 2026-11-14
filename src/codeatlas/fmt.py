@@ -73,16 +73,33 @@ def overview(o: dict) -> str:
     return "\n".join(L)
 
 
-def outline(o: dict, show_imports: bool = True) -> str:
-    L = [f"{o['path']}  [{o['lang']}, {o['lines']} lines, {len(o['symbols'])} symbols]"]
+COMPACT_OUTLINE_FROM = 60   # files with more symbols than this are summarised unless full=True
+COMPACT_TOP = 30            # top-level symbols kept in a compact outline
+COMPACT_MEMBERS = 6         # members kept per class in a compact outline
+
+
+def outline(o: dict, show_imports: bool = True, compact: bool = False) -> str:
+    """Outline of one file. ``compact`` folds big files: the most referenced members of each class and the most
+    referenced top-level symbols stay (in source order), the rest is counted with the call that lists it."""
+    n_sym = len(o["symbols"])
+    folding = compact and n_sym > COMPACT_OUTLINE_FROM
+    L = [f"{o['path']}  [{o['lang']}, {o['lines']} lines, {n_sym} symbols" + (", summarised" if folding else "") + "]"]
     by_parent: dict = {}
     for s in o["symbols"]:
         by_parent.setdefault(s["parent_id"], []).append(s)
 
+    def keep(kids: list, limit: int) -> tuple[list, int]:
+        if not folding or len(kids) <= limit:
+            return kids, 0
+        ranked = sorted(kids, key=lambda s: (-(s.get("ref_files") or 0), -int(bool(s.get("exported", 1))),
+                                             -(1 if by_parent.get(s["id"]) else 0), s["start_line"]))
+        chosen = {s["id"] for s in ranked[:limit]}
+        return [s for s in kids if s["id"] in chosen], len(kids) - limit
+
     def emit(parent, depth):
-        kids = by_parent.get(parent, [])
+        kids, folded = keep(by_parent.get(parent, []), COMPACT_TOP if parent is None else COMPACT_MEMBERS)
         for i, s in enumerate(kids):
-            last = i == len(kids) - 1
+            last = i == len(kids) - 1 and not folded
             pre = ("  " * depth + ("└─ " if last else "├─ ")) if depth else ""
             icon = KIND_ICON.get(s["kind"], s["kind"][:1])
             flags = ""
@@ -95,9 +112,14 @@ def outline(o: dict, show_imports: bool = True) -> str:
             dec = (" " + " ".join(s["decorators"][:2])) if s.get("decorators") else ""
             tags = (" {" + ",".join(s["pattern_tags"][:4]) + "}") if s.get("pattern_tags") else ""
             L.append(f"{pre}{icon} {_sig(s)}  :{s['start_line']}-{s['end_line']}{flags}{tags}{dec}")
-            if s.get("doc"):
+            if s.get("doc") and not folding:
                 L.append(f"{'  ' * (depth + 1)}   \"{s['doc'][:120]}\"")
             emit(s["id"], depth + 1)
+        if folded:
+            how = (f"file_outline(\"{o['path']}\", full=True) or find_symbols(query, path=\"{o['path']}\")" if parent is None
+                   else f"symbol(\"{next((p['qualified'] for p in o['symbols'] if p['id'] == parent), '?')}\")")
+            prefix = ("  " * depth + "└─ ") if depth else ""
+            L.append(f"{prefix}… {folded} more (less referenced): {how}")
 
     emit(None, 0)
     if show_imports and o["imports"]:

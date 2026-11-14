@@ -19,6 +19,8 @@ nothing to offer and the shell is the only tool available.
 Usage (hooks.json / settings.json)::
 
     codeatlas hook pretool [--prefix mcp__plugin_codeatlas_atlas] [--mode default|search|off]
+    codeatlas hook session-start [--prefix ...]   SessionStart: a few lines of orientation (index size, which
+                                                  tool to reach for) injected at startup, resume and after compaction
 
 * ``default`` gates, for the indexed repository only:
   - ``Grep``/``Glob`` and ``grep``/``rg``/``find`` in any Bash statement -> grep / find_symbols / references / list_files
@@ -455,11 +457,59 @@ def _rel(root: Path, fp: str) -> str:
         return fp
 
 
+def session_context(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
+    """Orientation for a SessionStart hook: what is indexed and which tool to reach for first.
+
+    Silent outside projects and when CODEATLAS_GUARD=off. Claude Code defers MCP tool schemas behind a search and
+    forgets how to work after compaction, so the same few lines return on ``startup``, ``resume``, ``clear`` and
+    ``compact`` (shorter after compaction). Kept to a few hundred tokens: this is read on every session.
+    """
+    if os.environ.get("CODEATLAS_GUARD", "").lower() == "off":
+        return None
+    cwd = Path(event.get("cwd") or os.getcwd())
+    from .roots import protected_reason
+    if protected_reason(cwd):
+        return None
+    source = event.get("source") or "startup"
+    root = find_index(cwd)
+    stats = ""
+    if root is not None:
+        try:
+            with _connect(root) as c:
+                files = c.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+                symbols = c.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+                langs = [r[0] for r in c.execute("SELECT lang FROM files GROUP BY lang ORDER BY COUNT(*) DESC LIMIT 4")]
+            stats = f" ({files} files, {symbols} symbols; {', '.join(langs)})"
+            if root != cwd:
+                stats += f" rooted at {root}"
+        except Exception:
+            stats = ""
+    head = f"CodeAtlas has indexed this repository{stats}." if root is not None else (
+        "CodeAtlas indexes this project when its MCP server starts (a few seconds for large repositories).")
+    if source == "compact":
+        return (f"{head} Keep using its tools instead of reading files: task_context(task, scope) to (re)start a task, "
+                f"file_outline / symbol_source instead of Read, find_symbols / references instead of Grep, "
+                f"connections(target, known) for how code you know reaches code you need. The server still remembers "
+                f"what you looked at before compaction. Tools: {prefix}__*.")
+    return "\n".join([
+        head + f" Use its MCP tools ({prefix}__*) instead of reading files or grepping; every answer carries path:line anchors.",
+        "- start a task: task_context(\"<what you are doing>\", scope=\"dir/\") returns the relevant symbols with source, callers, "
+        "tests and config in one call; it remembers what you look at and shows how new results connect to it",
+        "- locate: find_symbols, file_outline (summarised for big files; never a whole-file Read); read: symbol_source for just "
+        "the lines you need",
+        "- understand: symbol (callers, callees), references, impact, triggers; connections(target, known) for how A reaches B",
+        "- edit: replace_symbol / insert_code (parse-checked, re-indexed at once) instead of rewriting files",
+        "A hook denies built-in Grep/Glob, whole-file Read of indexed files and in-declaration Edit/Write, naming the CodeAtlas "
+        "call to make instead; unindexed files, docs and config are never gated.",
+    ])
+
+
 def run(argv: Optional[list[str]] = None) -> int:
-    """Entry point for ``codeatlas hook pretool``: read the event on stdin, print a decision, always exit 0."""
+    """Entry point for ``codeatlas hook pretool`` / ``session-start``: read the event on stdin, print the hook
+    output, always exit 0 (a failing hook must never block the agent)."""
     import argparse
     ap = argparse.ArgumentParser(prog="codeatlas hook")
-    ap.add_argument("event", nargs="?", default="pretool", choices=["pretool"])
+    ap.add_argument("event", nargs="?", default="pretool", choices=["pretool", "session-start"])
     ap.add_argument("--prefix", default=DEFAULT_PREFIX, help="MCP tool prefix to recommend")
     ap.add_argument("--mode", default=None, choices=["default", "search", "strict", "off"])
     ns = ap.parse_args(argv)
@@ -467,6 +517,15 @@ def run(argv: Optional[list[str]] = None) -> int:
         event = json.load(sys.stdin)
     except Exception:
         return 0  # malformed or empty stdin: never block the tool
+    if ns.event == "session-start":
+        try:
+            text = session_context(event, ns.prefix)
+        except Exception:
+            return 0
+        if text:
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                                                "additionalContext": text}}))
+        return 0
     try:
         reason = decide(event, ns.prefix, ns.mode or "default")
     except Exception:

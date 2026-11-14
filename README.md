@@ -60,7 +60,7 @@ codeatlas init        # writes agents + guidance, idempotent; the index builds i
 
 | Platform | How | Then |
 |---|---|---|
-| **Claude Code** | plugin `codeatlas@codeatlas` installed at user scope by the installer (or `claude plugin marketplace add 5hihan/codeatlas` + `claude plugin install codeatlas@codeatlas`) | `/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to the `codeatlas-navigator`, `codeatlas-sniper`, `codeatlas-reviewer` agents. A PreToolUse hook makes Claude actually use the index: in an indexed repo, built-in `Grep`/`Glob` and `grep`/`rg`/`find` in Bash are denied with the CodeAtlas tool to call instead (`CODEATLAS_GUARD=off` disables, `=strict` also redirects whole-file `Read`) |
+| **Claude Code** | plugin `codeatlas@codeatlas` installed at user scope by the installer (or `claude plugin marketplace add 5hihan/codeatlas` + `claude plugin install codeatlas@codeatlas`) | `/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to the `codeatlas-navigator`, `codeatlas-sniper`, `codeatlas-reviewer` agents. Two hooks make Claude actually use the index: a SessionStart hook injects a few lines of orientation at startup, resume and after every compaction, and a PreToolUse guard denies built-in `Grep`/`Glob`, whole-file `Read` of indexed files and in-declaration edits with the CodeAtlas tool to call instead (`CODEATLAS_GUARD=off` disables, `=search` keeps only the search redirects) |
 | **Codex** | `mcp_servers.codeatlas` in `~/.codex/config.toml` + skill in `~/.agents/skills/codeatlas` | type `$codeatlas` (Codex uses `$`, not `/`); the MCP tools are available in every project |
 | **Cursor** | `codeatlas init cursor` writes `.cursor/mcp.json` in the repo | the MCP tools appear in the agent |
 | **Anything else (MCP)** | `codeatlas serve --repo <path>` over stdio | 39 tools, see below |
@@ -121,7 +121,7 @@ attributed to an unrelated repository symbol.
 | `task_context` | **start here**: the symbols relevant to a task (stemmed BM25 over names, signatures, docs and module names + PageRank + graph proximity + pattern hints; tests, examples and private helpers weighed down, results spread across files), source for the strongest ones, tests, config/docs, inside an adaptive token budget; each item says why it is there. `known=[...]` (or, by default, what the agent looked at in this session) re-ranks results by how they connect to that code and renders the route to each one |
 | `connections` | **how what you know reaches what you want**: shortest labelled routes from known symbols/files to a target through calls, callback registrations, class membership, file containment, imports and env/table/config relationships, every hop a `path:line`; alternative routes, the symbols on the way, and an honest "no route within N hops" |
 | `repo_overview`, `repo_map` | languages, packages, hubs, entry points; the complete symbol map, files ordered by PageRank (pass `token_budget` to get only the top-ranked part) |
-| `file_outline`, `find_symbols`, `symbol`, `symbol_source` | outlines with reference counts and pattern tags; signature, doc, callers, callees; just the lines of one symbol |
+| `file_outline`, `find_symbols`, `symbol`, `symbol_source` | outlines with reference counts and pattern tags (files over 60 symbols are summarised to their most referenced members, `full=True` lists all); signature, doc, callers, callees; just the lines of one symbol |
 | `references`, `impact`, `triggers`, `dependencies`, `module_graph` | who uses it, what breaks, what makes it run, import graphs |
 | `relationships` | code ↔ config ↔ schema: env keys read and declared, SQL tables declared and used, literal config paths |
 | `programming_patterns` | 12 patterns (generics, closures, decorators, async, generators, error handling, ...) at real locations with evidence |
@@ -208,6 +208,20 @@ codeatlas snipe [board|scan [--run tests]|next|report FILE]  the loop from the s
 codeatlas plugin export DIR | dashboard --open | open | doctor
 codeatlas hook pretool [--prefix P] [--mode default|search|off]   Claude Code PreToolUse guard (shipped in the plugin)
 ```
+
+## Built for how Claude Code loads tools
+
+Claude Code defers MCP tool schemas behind a tool search and shows the model only tool names plus the server's
+instructions at session start. CodeAtlas works with that: the six tools an agent reaches for first
+(`task_context`, `connections`, `find_symbols`, `symbol`, `file_outline`, `symbol_source`) are flagged
+`anthropic/alwaysLoad` so the first useful call needs no search round-trip (`CODEATLAS_ALWAYS_LOAD` overrides the
+list), every navigation tool carries `readOnlyHint`/`idempotentHint` so Claude Code runs them in parallel with other
+read-only calls, and the server instructions stay inside the 4,096-character cap. A SessionStart hook adds about 270
+tokens of orientation (index size, which tool to reach for) at startup, resume and `/clear`, and a 125-token reminder
+after every compaction, when models otherwise forget the index exists. `codeatlas-plugin/evals/` holds
+`claude plugin eval` cases (a navigation question that must be answered with path:line evidence through CodeAtlas
+tools, and a non-code question that must not call them) so the with/without-plugin delta can be measured on every
+change.
 
 ## The guard: advice becomes a rule
 

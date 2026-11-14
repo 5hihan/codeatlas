@@ -196,18 +196,123 @@ def write_project_agents(repo: Path) -> list[str]:
 
 def plugin_hooks(prefix: str) -> dict:
     """Claude Code hooks: a PreToolUse guard that denies built-in search, whole-file reads and in-declaration edits
-    when the repo is indexed.
+    when the repo is indexed, and a SessionStart hook that injects a few lines of orientation.
 
     Advice in CLAUDE.md is not enough: Grep/Glob/Read/Edit schemas are always loaded while MCP tools are deferred,
     so the model reaches for them by default. The guard (``codeatlas hook pretool``) turns the advice into a rule
     and its deny reason names the CodeAtlas tool (and arguments) to call instead, so the model recovers in the same
-    turn. See :mod:`codeatlas.hook` for exactly what is gated.
+    turn. See :mod:`codeatlas.hook` for exactly what is gated. The SessionStart hook (``codeatlas hook
+    session-start``) runs at startup, resume, /clear and after every compaction: the index size and which tool to
+    reach for first, so the first call of a session is a CodeAtlas call and the habit survives compaction.
     """
-    return {"hooks": {"PreToolUse": [{
-        "matcher": "Grep|Glob|Bash|Read|Edit|MultiEdit|Write",
-        "hooks": [{"type": "command", "command": f"codeatlas hook pretool --prefix {prefix}",
-                   "timeout": 10, "continueOnBlock": True}],
-    }]}}
+    return {"hooks": {
+        "SessionStart": [{
+            "matcher": "startup|resume|clear|compact",
+            "hooks": [{"type": "command", "command": f"codeatlas hook session-start --prefix {prefix}", "timeout": 5}],
+        }],
+        "PreToolUse": [{
+            "matcher": "Grep|Glob|Bash|Read|Edit|MultiEdit|Write",
+            "hooks": [{"type": "command", "command": f"codeatlas hook pretool --prefix {prefix}",
+                       "timeout": 10, "continueOnBlock": True}],
+        }],
+    }}
+
+
+EVALS = {
+    # A realistic question in a tiny scaffolded repository; measured with and without the plugin by
+    # `claude plugin eval codeatlas-plugin` (needs --scaffold for the workspace). Outcome: the answer names the
+    # right definition with a path:line anchor. Process: the plugin's tools were used (with-plugin arm only).
+    "evals/where-is-it/case.yaml": """schema_version: "1.1"
+name: where-is-it
+description: A navigation question in a small indexed repository; the answer must carry path:line evidence.
+tags: [navigation, task_context]
+plugins: ["../.."]
+runs: 3
+expected_outcome: Names apply_discount in pricing.py with its line, and checkout as the caller, without reading whole files.
+execution:
+  max_turns: 12
+  timeout_seconds: 300
+context:
+  scaffold_script: |
+    mkdir -p shop tests
+    cat > shop/__init__.py <<'PY'
+    PY
+    cat > shop/pricing.py <<'PY'
+    def base_total(items):
+        return sum(i["price"] * i["qty"] for i in items)
+
+
+    def apply_discount(total, code):
+        if code == "VIP":
+            return total * 0.8
+        return total
+    PY
+    cat > shop/checkout.py <<'PY'
+    from .pricing import base_total, apply_discount
+
+
+    def checkout(items, code=None):
+        total = base_total(items)
+        return apply_discount(total, code)
+    PY
+    cat > tests/test_checkout.py <<'PY'
+    from shop.checkout import checkout
+
+
+    def test_vip():
+        assert checkout([{"price": 10, "qty": 1}], "VIP") == 8
+    PY
+""",
+    "evals/where-is-it/prompt.md": """---
+schema_version: "1.1"
+name: where-is-it
+---
+Where is the discount applied when an order total is computed, and what calls it? Answer with file:line anchors.
+""",
+    "evals/where-is-it/graders/answer-anchored.md": """---
+type: regex
+pattern: "shop/pricing\\.py:\\d+"
+target: last_message
+---
+The answer cites the discount function's location in shop/pricing.py with a line number.
+""",
+    "evals/where-is-it/graders/names-caller.md": """---
+type: regex
+pattern: "checkout"
+target: last_message
+---
+The answer names checkout as the caller of apply_discount.
+""",
+    "evals/where-is-it/graders/used-codeatlas.md": """---
+type: regex
+pattern: "mcp__plugin_codeatlas_atlas__(task_context|find_symbols|symbol|references|connections|file_outline|symbol_source)"
+target: trace
+arm: with-only
+---
+CodeAtlas tools answered the question (not Grep or whole-file Read).
+""",
+    "evals/no-code-question/prompt.md": """---
+schema_version: "1.1"
+name: no-code-question
+description: A question that has nothing to do with the repository must not trigger CodeAtlas tools.
+tags: [negative]
+plugins: ["../.."]
+runs: 2
+expected_outcome: A direct answer with no CodeAtlas tool call.
+max_turns: 3
+---
+In two sentences, what is the difference between a mutex and a semaphore?
+""",
+    "evals/no-code-question/graders/no-atlas-calls.md": """---
+type: regex
+pattern: "mcp__plugin_codeatlas_atlas__"
+target: trace
+match: not_contains
+arm: both
+---
+No CodeAtlas tool was called for a question that is not about the code.
+""",
+}
 
 
 def write_plugin(target: Path) -> list[str]:
@@ -223,6 +328,8 @@ def write_plugin(target: Path) -> list[str]:
         "author": {"name": "CodeAtlas"},
         "license": "MIT",
         "homepage": "https://github.com/5hihan/codeatlas",
+        "repository": "https://github.com/5hihan/codeatlas",
+        "keywords": ["code-intelligence", "tree-sitter", "code-map", "symbols", "call-graph", "mcp", "snipe"],
     }
     files = {
         ".claude-plugin/plugin.json": json.dumps(manifest, indent=2) + "\n",
@@ -234,8 +341,10 @@ def write_plugin(target: Path) -> list[str]:
                       "(`uv tool install codeatlas`). Load with `claude --plugin-dir <this dir>` or install it, then use\n"
                       "`/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to\n"
                       "the `codeatlas-navigator`, `codeatlas-sniper` and `codeatlas-reviewer` agents.\n\n"
-                      "`hooks/hooks.json` installs a PreToolUse guard. In a repository that has a `.codeatlas/index.db`, "
-                      "for files the index\nknows, it denies with a message naming the CodeAtlas tool to use instead:\n\n"
+                      "`hooks/hooks.json` installs two hooks. A SessionStart hook (startup, resume, /clear and after every "
+                      "compaction) injects a few\nlines of orientation: the index size and which tool to reach for first. "
+                      "A PreToolUse guard, in a repository that has a\n`.codeatlas/index.db`, "
+                      "for files the index\nknows, denies with a message naming the CodeAtlas tool to use instead:\n\n"
                       "- Grep/Glob and `grep`/`rg`/`find` in any Bash statement -> `grep`, `find_symbols`, `references`, "
                       "`list_files`\n"
                       "- whole-file Read and `cat` through Bash -> `file_outline`, `symbol_source`\n"
@@ -249,12 +358,18 @@ def write_plugin(target: Path) -> list[str]:
                       "and config, bounded partial reads,\nedits outside declarations, and any directory outside the "
                       "indexed repository (a reference checkout, another\nproject), where CodeAtlas has no index and the "
                       "shell is the only tool. Set `CODEATLAS_GUARD=search` in your own\nenvironment for search-only "
-                      "redirects, or `off` to disable the guard.\n"),
+                      "redirects, or `off` to disable the guard.\n\n"
+                      "`evals/` holds `claude plugin eval` cases (run with `--scaffold`): a navigation question that must "
+                      "be answered with\npath:line evidence through CodeAtlas tools, and a non-code question that must not "
+                      "call them. The with/without-plugin\ndelta is the number to beat when changing tools, descriptions or "
+                      "the guard.\n"),
     }
     for name, text in agent_files(PLUGIN_PREFIX).items():
         files[f"agents/{name}.md"] = text
     for name, text in COMMANDS.items():
         files[f"commands/{name}.md"] = text
+    files.update(EVALS)
+    files["evals/.gitignore"] = "results/\n"
     for rel, text in files.items():
         p = target / rel
         p.parent.mkdir(parents=True, exist_ok=True)

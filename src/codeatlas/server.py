@@ -41,6 +41,12 @@ Feed failures with snipe_report; snipe_scan finds concrete problems; opportuniti
 snipe into a refactor. All outputs are compact text with path:line anchors."""
 
 
+# Tools kept in Claude's context from the start (Claude Code defers the other MCP tool schemas behind a search):
+# the ones an agent reaches for first, so the first useful call needs no search round-trip.
+ALWAYS_LOAD = frozenset(os.environ.get("CODEATLAS_ALWAYS_LOAD", "task_context,connections,find_symbols,symbol,"
+                                       "file_outline,symbol_source").split(","))
+
+
 class App:
     """Holds the per-repo runtime: index, atlas, snipe, watcher and dashboard."""
 
@@ -176,12 +182,22 @@ def build_server(app: App):
 
     PROFILES = {"nav": {"nav"}, "edit": {"nav", "edit"}, "snipe": {"nav", "snipe"}, "all": {"nav", "edit", "snipe"}}
     enabled = PROFILES.get(app.profile, PROFILES["all"])
+    from mcp.types import ToolAnnotations
 
-    def tool(fn=None, *, group: str = "nav"):
-        """Register a tool in a group; groups outside the active profile are not exposed."""
+    def tool(fn=None, *, group: str = "nav", read_only: Optional[bool] = None, always_load: bool = False):
+        """Register a tool in a group; groups outside the active profile are not exposed.
+
+        Navigation tools are read-only and idempotent (Claude Code runs them in parallel with other read-only
+        calls and may retry them after a dropped connection); nothing here reaches outside the repository.
+        Claude Code defers MCP tool schemas behind a tool search by default: ``always_load`` keeps the few tools an
+        agent reaches for first (ALWAYS_LOAD) in context from the start, so no search round-trip precedes them.
+        """
         def deco(f):
             if group in enabled:
-                return mcp.tool()(guarded(f))
+                ro = (group == "nav") if read_only is None else read_only
+                ann = ToolAnnotations(readOnlyHint=ro, idempotentHint=ro, destructiveHint=not ro, openWorldHint=False)
+                meta = {"anthropic/alwaysLoad": True} if (always_load or f.__name__ in ALWAYS_LOAD) else None
+                return mcp.tool(annotations=ann, meta=meta)(guarded(f))
             return f
         return deco(fn) if fn is not None else deco
 
@@ -197,7 +213,7 @@ def build_server(app: App):
                 f"watcher: {w.get('backend')} alive={w.get('alive')} events={w.get('events')}\n"
                 f"dashboard: {s['dashboard'] or 'off'}\nsnipe: {s['snipe']}")
 
-    @tool
+    @tool(read_only=False)
     def index_repo(full: bool = False) -> str:
         """Force a re-scan of the repository. The index already auto-updates on file changes; use full=True after
         changing .gitignore or if results look stale."""
@@ -289,14 +305,16 @@ def build_server(app: App):
 
     # ------------------------------------------------------------------ files / symbols
     @tool
-    def file_outline(path: str, include_private: bool = True, show_imports: bool = True) -> str:
+    def file_outline(path: str, include_private: bool = True, show_imports: bool = True, full: bool = False) -> str:
         """Tree of classes/functions/methods in a file with line ranges, signatures, reference counts, imports and
-        importers. Read this instead of the file."""
+        importers. Read this instead of the file. Files with more than 60 symbols are summarised (the most
+        referenced members of each class, the most referenced top-level symbols, with a count of what was folded
+        and how to get it); full=True lists everything."""
         o = app.atlas.outline(path, include_private)
         if o is None:
             return f"file not indexed: {path} (unsupported language, ignored, or wrong path; try list_files)"
         app.working.note_file(o["path"])
-        return fmt.outline(o, show_imports)
+        return fmt.outline(o, show_imports, compact=not full)
 
     @tool
     def find_symbols(query: str, kind: Optional[str] = None, path: Optional[str] = None, limit: int = 25) -> str:
@@ -418,14 +436,14 @@ def build_server(app: App):
         return json.dumps(edits.rename_symbol(app.atlas, name, new_name, path, dry_run, include_tests), indent=1)
 
     # ------------------------------------------------------------------ SNIPE loop
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=True)
     def next_snipe(agent: Optional[str] = None) -> str:
         """The highest-value isolated issue to fix next (your own in-progress snipe first). Returns the problem,
         evidence, suspect symbol with confidence, related symbols, context cost, risk and the verification tests.
         Pass agent="<stable id>" so several agents never pick the same item."""
         return render_next(app.snipe.next(agent))
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=False)
     def claim_snipe(id: str, agent: Optional[str] = None) -> str:
         """Take ownership of an issue (state FIXING) and snapshot its files so verify_snipe can measure the patch
         surface. Returns level-1 context (symbol names + ranked candidates)."""
@@ -435,14 +453,14 @@ def build_server(app: App):
             app.remember(it.get("suspect_path"), it.get("suspect_line"))
         return app.snipe.context(id, 1) if r["ok"] else r["error"]
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=True)
     def get_snipe_context(id: str, level: int = 1) -> str:
         """Lazy context for an issue. Climb only as high as needed: 0 summary, 1 symbol names + candidates with
         evidence/counter-evidence, 2 signatures, 3 implementation bodies of suspect + related, 4 callers and
         dependencies, 5 the full suspect file, 6 subsystem context (task_context)."""
         return app.snipe.context(id, int(level))
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=False)
     def verify_snipe(id: str, deep: bool = False) -> str:
         """Evaluate outward from what you changed: level 1 parse check + dead-reference check + targeted tests;
         level 2 tests of callers (only if level 1 passed); level 3 full suite only when deep=True or risk is high.
@@ -450,14 +468,14 @@ def build_server(app: App):
         ABORTED (promoted to INVESTIGATE)."""
         return render_verify(app.snipe.verify(id, deep))
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=False)
     def snipe_report(text: str, source: str = "test") -> str:
         """Feed external evidence: paste failing test / typecheck / lint / runtime output. Each failing test or
         distinct location becomes an issue, narrowed to a suspect symbol. source: test | typecheck | lint | runtime."""
         created = app.snipe.report(text, source)
         return "\n".join(render_item(c, brief=True) for c in created) if created else "no failures recognised in that output"
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=False)
     def snipe_scan(run: Optional[str] = None) -> str:
         """Scan for concrete problems. Without run: cheap static pass (unresolved relative imports become issues;
         complexity/cycles/swallowed errors become dormant opportunities). run='tests'|'typecheck'|'lint' also runs
@@ -469,12 +487,12 @@ def build_server(app: App):
             L.append(f"{run}: " + (f"{'ok' if rr.get('ok') else 'FAILED'} ({rr.get('seconds')}s) -> issues {rr.get('issues')}" if rr.get("ran") else rr.get("error", "")))
         return "\n".join(L)
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=True)
     def snipe_board() -> str:
         """Ready-to-snipe list (score, symbols, tokens, risk), investigating, current work per agent, counts."""
         return render_board(app.snipe.board(), watcher_alive=bool(app.watcher and app.watcher.status()["alive"]))
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=True)
     def snipe_list(kind: str = "issue", state: Optional[str] = None, priority: Optional[str] = None, limit: int = 30) -> str:
         """List records. kind: issue | opportunity. state: comma list of FOUND,TARGETED,FIXING,VERIFYING,DONE,BLOCKED.
         priority: 'SNIPE NOW' | INVESTIGATE | DEFER | IGNORE."""
@@ -482,13 +500,13 @@ def build_server(app: App):
         return "\n".join(f"{i['score']:>3} {i['id']:<8} {i['state']:<10} {i['priority'] or '-':<11} {i['problem'][:80]}"
                           + (f"  -> {i['suspect']}" if i.get("suspect") else "") for i in rows) or "(none)"
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=True)
     def snipe_item(id: str) -> str:
         """Full record of one issue/opportunity: evidence, candidates, factors, notes."""
         it = app.snipe.get(id)
         return render_item(it) if it else f"no item {id}"
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=False)
     def snipe_add(problem: str, evidence: Optional[list[str]] = None, kind: str = "issue", suspect: Optional[str] = None,
                   priority: Optional[str] = None) -> str:
         """Record a concrete defect (kind=issue) or a dormant improvement (kind=opportunity). Give evidence as
@@ -497,21 +515,21 @@ def build_server(app: App):
         app.snipe.save()
         return render_item(rec, brief=True)
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=False)
     def snipe_update(id: str, state: Optional[str] = None, note: Optional[str] = None, priority: Optional[str] = None,
                      suspect: Optional[str] = None, kind: Optional[str] = None, agent: Optional[str] = None) -> str:
         """Change state (FOUND|TARGETED|FIXING|VERIFYING|DONE|BLOCKED), priority, suspect or kind; add a note."""
         r = app.snipe.update(id, state, note, priority, suspect, kind, agent)
         return render_item(r["item"], brief=True) if r["ok"] else r["error"]
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=False)
     def snipe_abort(id: str, reason: str) -> str:
         """Stop condition: the fix stopped being a snipe (schema migration, public API change, many modules).
         Marks it BLOCKED / INVESTIGATE with the reason so nobody wanders for 40 minutes."""
         r = app.snipe.abort(id, reason)
         return render_item(r["item"], brief=True) if r["ok"] else r["error"]
 
-    @tool(group="snipe")
+    @tool(group="snipe", read_only=False)
     def snipe_config(test_cmd: Optional[str] = None, full_test_cmd: Optional[str] = None, typecheck_cmd: Optional[str] = None,
                      lint_cmd: Optional[str] = None, max_patch_symbols: Optional[int] = None,
                      max_patch_files: Optional[int] = None, test_timeout: Optional[int] = None) -> str:
