@@ -246,35 +246,39 @@ execution:
   max_turns: 12
   timeout_seconds: 300
 context:
-  scaffold_script: |
-    mkdir -p shop tests
-    cat > shop/__init__.py <<'PY'
-    PY
-    cat > shop/pricing.py <<'PY'
-    def base_total(items):
-        return sum(i["price"] * i["qty"] for i in items)
+  scaffold_script: scaffold.sh
+""",
+    "evals/where-is-it/scaffold.sh": """#!/usr/bin/env bash
+# Builds the tiny repository the where-is-it case asks about (run by `claude plugin eval --scaffold`).
+set -euo pipefail
+mkdir -p shop tests
+cat > shop/__init__.py <<'PY'
+PY
+cat > shop/pricing.py <<'PY'
+def base_total(items):
+    return sum(i["price"] * i["qty"] for i in items)
 
 
-    def apply_discount(total, code):
-        if code == "VIP":
-            return total * 0.8
-        return total
-    PY
-    cat > shop/checkout.py <<'PY'
-    from .pricing import base_total, apply_discount
+def apply_discount(total, code):
+    if code == "VIP":
+        return total * 0.8
+    return total
+PY
+cat > shop/checkout.py <<'PY'
+from .pricing import base_total, apply_discount
 
 
-    def checkout(items, code=None):
-        total = base_total(items)
-        return apply_discount(total, code)
-    PY
-    cat > tests/test_checkout.py <<'PY'
-    from shop.checkout import checkout
+def checkout(items, code=None):
+    total = base_total(items)
+    return apply_discount(total, code)
+PY
+cat > tests/test_checkout.py <<'PY'
+from shop.checkout import checkout
 
 
-    def test_vip():
-        assert checkout([{"price": 10, "qty": 1}], "VIP") == 8
-    PY
+def test_vip():
+    assert checkout([{"price": 10, "qty": 1}], "VIP") == 8
+PY
 """,
     "evals/where-is-it/prompt.md": """---
 schema_version: "1.1"
@@ -284,25 +288,33 @@ Where is the discount applied when an order total is computed, and what calls it
 """,
     "evals/where-is-it/graders/answer-anchored.md": """---
 type: regex
-pattern: "shop/pricing\\.py:\\d+"
+pattern: 'shop/pricing\\.py:\\d+'
 target: last_message
 ---
 The answer cites the discount function's location in shop/pricing.py with a line number.
 """,
     "evals/where-is-it/graders/names-caller.md": """---
 type: regex
-pattern: "checkout"
+pattern: 'checkout'
 target: last_message
 ---
 The answer names checkout as the caller of apply_discount.
 """,
-    "evals/where-is-it/graders/used-codeatlas.md": """---
-type: regex
-pattern: "mcp__plugin_codeatlas_atlas__(task_context|find_symbols|symbol|references|connections|file_outline|symbol_source)"
-target: trace
+    "evals/where-is-it/graders/used-task-context.md": """---
+type: tool_used
+tool: mcp__plugin_codeatlas_atlas__task_context
 arm: with-only
 ---
-CodeAtlas tools answered the question (not Grep or whole-file Read).
+The question was answered through CodeAtlas (indicator only: the with-plugin arm).
+""",
+    "evals/where-is-it/graders/no-whole-file-read.md": """---
+type: tool_used
+tool: Read
+min: 0
+max: 0
+arm: with-only
+---
+No whole-file Read was needed with the plugin (indicator only).
 """,
     "evals/no-code-question/prompt.md": """---
 schema_version: "1.1"
@@ -316,14 +328,24 @@ max_turns: 3
 ---
 In two sentences, what is the difference between a mutex and a semaphore?
 """,
-    "evals/no-code-question/graders/no-atlas-calls.md": """---
-type: regex
-pattern: "mcp__plugin_codeatlas_atlas__"
-target: trace
-match: not_contains
+    # `tool_used ... max: 0` per entry tool: a trace regex would also match the SessionStart orientation text
+    "evals/no-code-question/graders/no-task-context.md": """---
+type: tool_used
+tool: mcp__plugin_codeatlas_atlas__task_context
+min: 0
+max: 0
 arm: both
 ---
-No CodeAtlas tool was called for a question that is not about the code.
+task_context was not called for a question that is not about the code.
+""",
+    "evals/no-code-question/graders/no-find-symbols.md": """---
+type: tool_used
+tool: mcp__plugin_codeatlas_atlas__find_symbols
+min: 0
+max: 0
+arm: both
+---
+find_symbols was not called for a question that is not about the code.
 """,
 }
 
@@ -365,7 +387,9 @@ def write_plugin(target: Path) -> list[str]:
         "skills/codeatlas/SKILL.md": SKILL,
         "hooks/hooks.json": json.dumps(plugin_hooks(PLUGIN_PREFIX), indent=2) + "\n",
         "README.md": ("# CodeAtlas plugin for Claude Code\n\nRequires the `codeatlas` command on PATH "
-                      "(`uv tool install codeatlas`). Load with `claude --plugin-dir <this dir>` or install it, then use\n"
+                      "(`uv tool install codeatlas`, or the one-line installer in the repository README). Install in one step:\n\n"
+                      "```\n/plugin install codeatlas --marketplace 5hihan/codeatlas\n```\n\n"
+                      "or load it with `claude --plugin-dir <this dir>`, then use\n"
                       "`/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to\n"
                       "the `codeatlas-navigator`, `codeatlas-sniper` and `codeatlas-reviewer` agents.\n\n"
                       "`hooks/hooks.json` installs three hooks. A SessionStart hook (startup, resume, /clear and after every "

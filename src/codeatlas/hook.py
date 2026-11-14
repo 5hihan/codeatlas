@@ -537,11 +537,12 @@ def session_context(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
                 f"what you looked at before compaction. Tools: {prefix}__*.")
     return "\n".join([
         head + f" Use its MCP tools ({prefix}__*) instead of reading files or grepping; every answer carries path:line anchors.",
-        "- start a task: task_context(\"<what you are doing>\", scope=\"dir/\") returns the relevant symbols with source, callers, "
-        "tests and config in one call; it remembers what you look at and shows how new results connect to it",
+        "- a task or question in prose: task_context(\"<what you are doing>\", scope=\"dir/\") returns the relevant symbols "
+        "with source, callers, tests and config in one call; it remembers what you look at and shows how new results connect to it",
+        "- a named symbol: symbol (signature, callers, callees); who calls it / what breaks: references, impact (never Grep "
+        "for an identifier); what triggers it: triggers; how A reaches B: connections(target, known)",
         "- locate: find_symbols, file_outline (summarised for big files; never a whole-file Read); read: symbol_source for just "
         "the lines you need",
-        "- understand: symbol (callers, callees), references, impact, triggers; connections(target, known) for how A reaches B",
         "- edit: replace_symbol / insert_code (parse-checked, re-indexed at once) instead of rewriting files",
         "A hook denies built-in Grep/Glob, whole-file Read of indexed files and in-declaration Edit/Write, naming the CodeAtlas "
         "call to make instead; unindexed files, docs and config are never gated.",

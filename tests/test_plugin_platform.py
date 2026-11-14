@@ -185,7 +185,13 @@ def test_plugin_manifest_marketplace_and_evals(tmp_path: Path):
         assert (d / "prompt.md").exists() and list((d / "graders").glob("*.md")), "a case needs a prompt and a grader"
         for g in (d / "graders").glob("*.md"):
             fm = g.read_text(encoding="utf-8").split("---")[1]
-            assert "type: regex" in fm and "pattern:" in fm and "target:" in fm
+            if "type: regex" in fm:
+                assert "pattern: '" in fm and "target:" in fm, "regex patterns are single-quoted YAML (backslashes survive)"
+            else:
+                assert "type: tool_used" in fm and "tool: " in fm
+    # the negative case must not rely on a trace regex: the SessionStart text itself names the tool prefix
+    neg = (tmp_path / "plugin" / "evals" / "no-code-question" / "graders")
+    assert all("type: tool_used" in g.read_text() and "max: 0" in g.read_text() for g in neg.glob("*.md"))
     scaffold = (tmp_path / "plugin" / "evals" / "where-is-it" / "case.yaml").read_text(encoding="utf-8")
     assert "scaffold_script" in scaffold and "apply_discount" in scaffold
     assert (tmp_path / "plugin" / "evals" / ".gitignore").read_text() == "results/\n"

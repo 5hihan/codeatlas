@@ -58,7 +58,8 @@ KIND_FACTORS = {"interface": 0.75, "type": 0.75, "enum": 0.8, "constant": 0.7, "
 PRIVATE_FACTOR = 0.8      # private helpers are reached through their public callers
 FILE_DIVERSITY = 0.75     # the k-th candidate from one file counts FILE_DIVERSITY**k: spread the answer, outline the rest
 PATH_TERM_WEIGHT = 0.5    # per task term that names the symbol's module (directory or file): "dependencies" -> fastapi/dependencies/
-MAX_SOURCE_ITEMS = 8      # bodies are included for the strongest items only; the rest keep a signature and a handle
+MAX_SOURCE_ITEMS = 4      # bodies are included for the strongest items only; the rest keep a signature and a handle
+MAX_SOURCE_LINES = 100    # longer bodies are read on demand with symbol_source
 
 
 def split_words(s: str) -> list[str]:
@@ -506,7 +507,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 tests[path].add(line)
     result["tests"] = [{"path": p, "lines": sorted(ls)[:6], "hits": len(ls)} for p, ls in
                        sorted(tests.items(), key=lambda kv: -len(kv[1]))[:6]]
-    result["docs"] = _docs_mentioning(ix, terms[:8], scope, limit=4)
+    result["docs"] = _docs_mentioning(ix, terms[:8], scope, limit=3)
 
     # Reserve dependency evidence and tests before adding optional source bodies.
     selected = {sid: atlas.symbol_by_id(sid) for sid in top}
@@ -551,7 +552,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         # source bodies for the strongest items while budget allows (cap 120 lines each); bridges stay signatures
         if (include_source and len(items) < MAX_SOURCE_ITEMS and s["lines"] <= 160 and source_used < allocations["source"]
                 and sid not in bridge_ids):
-            src = atlas.source(s["qualified"], s["path"], max_lines=120)
+            src = atlas.source(s["qualified"], s["path"], max_lines=MAX_SOURCE_LINES)
             if src.get("found"):
                 scost = estimate_tokens(src["text"])
                 if source_used + scost <= allocations["source"]:
