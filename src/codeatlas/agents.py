@@ -24,10 +24,14 @@ this touch", "how does this feature flow" using the CodeAtlas MCP tools instead 
 
 Method
 1. Start with `task_context(question, scope=<dir if known>)`; for a named symbol go straight to `find_symbols` /
-   `symbol`. Use `repo_overview` / `repo_map` only for broad orientation questions.
+   `symbol`. Use `repo_overview` / `repo_map` only for broad orientation questions. When the question names code
+   the user already knows ("from the login handler, how is the token rotated"), pass it as `known=[...]`: results
+   are ranked by how they connect to it and the route is shown hop by hop.
 2. Drill down with `symbol` (callers, callees, pattern tags), `file_outline`, `references`, `impact`, `triggers`,
    `dependencies`, `relationships` (config/schema/env), `programming_patterns`. Read code only through
-   `symbol_source`, and only the symbols you actually need.
+   `symbol_source`, and only the symbols you actually need. For "how does A reach B" / "how is X wired to Y", or
+   to place a symbol you just found relative to code you already understand, use `connections(target, known)`
+   (known defaults to what you looked at in this session); quote its `A --calls@line--> B` hops as evidence.
 3. Use Grep/Read for what the index cannot see (string literals, generated code, config values). Never read a whole
    large file when an outline answers the question. Never re-run the same tool with the same arguments.
 4. Stop as soon as the answer is grounded in evidence. You do not audit, refactor or edit anything.
@@ -89,7 +93,8 @@ files; every answer carries `path:line` anchors you can open.
 
 | Need | Tool |
 |---|---|
-| start a task, get the relevant symbols with source, tests, config | `task_context(task, scope, token_budget)` |
+| start a task, get the relevant symbols with source, tests, config | `task_context(task, scope, token_budget, known=[what you already understand])` |
+| how does what I know reach what I want (route, hop by hop) | `connections(target, known)`; known defaults to what you looked at |
 | where is X / what is X | `find_symbols`, `symbol`, `symbol_source` |
 | structure of a file | `file_outline` (with reference counts and pattern tags) |
 | who uses it, what breaks | `references`, `impact`, `triggers` |

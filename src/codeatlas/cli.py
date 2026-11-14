@@ -4,6 +4,8 @@
   codeatlas init [--global]             set up this repo (auto-detects Claude Code / Codex / Cursor); --global once per machine
   codeatlas index [--full]              build/refresh the index once
   codeatlas map [--budget N]            print the ranked repo map
+  codeatlas context "<task>" [--known X]   task_context; --known names what you already understand
+  codeatlas connections TARGET --known X   routes from what you know to the target, each hop path:line
   codeatlas outline PATH | symbol NAME | refs NAME | impact NAME | triggers NAME
   codeatlas snipe [board|scan|next|md|report FILE]   the SNIPE loop from the shell
   codeatlas dashboard [--open]          run only the dashboard
@@ -56,7 +58,18 @@ def cmd_context(args) -> None:
     from . import context
     ix, atlas = _atlas(_repo(args))
     atlas.ensure_fresh()
-    print(context.render(context.task_context(ix, atlas, args.task, args.scope, args.budget)))
+    print(context.render(context.task_context(ix, atlas, args.task, args.scope, args.budget, known=args.known or None)))
+
+
+def cmd_connections(args) -> None:
+    from . import connect
+    ix, atlas = _atlas(_repo(args))
+    try:
+        atlas.ensure_fresh()
+        result = connect.connections(ix, atlas, args.target, args.known or [], max_hops=args.hops, limit=args.limit)
+        print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else connect.render(result))
+    finally:
+        ix.close()
 
 
 def cmd_changes(args) -> None:
@@ -204,6 +217,8 @@ GUIDE_BLOCK = """
 This repo is indexed by the `codeatlas` MCP server. Before reading files, use its tools:
 start with `task_context("<what you are doing>", scope="dir/")`, then `file_outline`, `find_symbols`, `symbol`,
 `symbol_source`, `references`, `impact`, `triggers`, `dependencies`; `change_context` before finishing.
+`task_context` remembers what you looked at and shows how results connect to it; pass `known=[...]` to name
+what you already understand. `connections(target, known)` answers "how does A reach B" hop by hop (path:line).
 Read symbols, not whole files. Edit precisely with `replace_symbol` / `insert_code` / `rename_symbol`
 (syntax-checked); never rewrite a whole source file.
 Fix work follows SNIPE (Scan, Narrow, Infer, Patch, Evaluate): `next_snipe(agent="<your id>")` ->
@@ -494,6 +509,13 @@ def main(argv: Optional[list[str]] = None) -> None:
     p.add_argument("task")
     p.add_argument("--scope")
     p.add_argument("--budget", type=int, default=None, help="token budget (default: adaptive)")
+    p.add_argument("--known", action="append", help="a symbol, file or path:line you already understand (repeatable)")
+    p = add("connections", cmd_connections, help="how known symbols/files connect to a target (routes with path:line hops)")
+    p.add_argument("target", nargs="+", help="symbol, qualified name, path or path:line")
+    p.add_argument("--known", action="append", help="where to start from (repeatable)")
+    p.add_argument("--hops", type=int, default=6)
+    p.add_argument("--limit", type=int, default=4, help="distinct routes per target")
+    p.add_argument("--json", action="store_true")
     p = add("changes", cmd_changes, help="change_context vs a git ref")
     p.add_argument("--base", default="HEAD")
     p.add_argument("--comparison", choices=["working", "staged", "branch"], default="working")

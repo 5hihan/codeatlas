@@ -12,9 +12,9 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
-from . import __version__, changes, context, edits, fmt, rank, patterns as pattern_tools, relationships as relation_tools
+from . import __version__, changes, connect, context, edits, fmt, rank, patterns as pattern_tools, relationships as relation_tools
 from .graph import Atlas
 from .indexer import Index
 from .snipe import Snipe, render_board, render_item, render_next, render_verify
@@ -24,7 +24,11 @@ log = logging.getLogger("codeatlas")
 
 INSTRUCTIONS = """CodeAtlas gives you a tree-sitter map of this repository so you do NOT need to read whole files.
 Start a task with task_context("<what you are doing>", scope="dir/"): it returns the relevant
-symbols with source, callers, tests and config in one call. Then: find_symbols / file_outline to locate -> symbol
+symbols with source, callers, tests and config in one call. It remembers what you looked at in this session
+(symbol, symbol_source, file_outline, references, edits) and ranks results by how they connect to it, showing the
+route (main --calls@4--> handle --calls@5--> process); pass known=[...] to name what you understand, known=[] to
+start fresh. connections(target, known) answers "how does A reach B" with every hop anchored to path:line.
+Then: find_symbols / file_outline to locate -> symbol
 (callers, callees, signature) -> symbol_source for just the lines you need -> impact / triggers / references before
 changing anything. change_context(base_ref) summarises what you changed and which consumers/tests to re-check.
 relationships(path) traces code/config/schema dependencies. programming_patterns(path) explains detected
@@ -49,6 +53,7 @@ class App:
         self.snipe = Snipe(self.atlas)
         self.watcher: Optional[Watcher] = None
         self.dashboard = None
+        self.working = connect.WorkingSet()   # what this agent looked at: default `known` anchors
         self.events: list[dict] = []
         self.started = time.time()
         self._lock = self.ix.lock
@@ -95,6 +100,26 @@ class App:
     # ------------------------------------------------------------------ helpers
     def fresh(self) -> None:
         self.atlas.ensure_fresh()
+
+    def remember(self, path: Optional[str], line: Optional[int] = None) -> None:
+        """Record a position the agent looked at (the enclosing symbol, else the file) as a known anchor."""
+        if not path:
+            return
+        rel = self.ix.rel(path)
+        if line is not None:
+            row = self.ix.conn.execute(
+                "SELECT s.qualified, s.start_line FROM symbols s JOIN files f ON f.id=s.file_id WHERE f.path=? AND "
+                "s.start_line<=? AND s.end_line>=? ORDER BY (s.end_line-s.start_line) LIMIT 1", (rel, line, line)).fetchone()
+            if row:
+                self.working.note_symbol({"path": rel, "start_line": row[1], "qualified": row[0]})
+                return
+        self.working.note_file(rel)
+
+    def known_anchors(self, known: Optional[list]) -> tuple[list[str], str]:
+        """Explicit `known` wins; None falls back to the session's working set; [] means start fresh."""
+        if known is None and len(self.working):
+            return self.working.anchors(), "recent"
+        return list(known or []), "given"
 
     def status(self) -> dict:
         c = self.ix.conn
@@ -197,13 +222,37 @@ def build_server(app: App):
 
     @tool
     def task_context(task: str, scope: Optional[str] = None, token_budget: Optional[int] = None, include_source: bool = True,
-                     max_symbols: int = 40) -> str:
+                     max_symbols: int = 40, known: Optional[list[str]] = None) -> str:
         """One call to start a task: the symbols relevant to the task text (BM25 over names/signatures/docs,
         boosted by PageRank and graph proximity), with source for the strongest ones, plus tests and config/docs
-        that mention the terms. scope limits to a path prefix (e.g. "backend/src/services"). Always fits
+        that mention the terms. scope limits to a path prefix (e.g. "backend/src/services"). known = symbols,
+        files or path:line positions you already understand: results are re-ranked by how closely they connect to
+        them, the anchors themselves are not repeated, symbols that bridge them to a result are added, and a
+        section shows the route from each anchor to the results (main --calls@4--> handle --calls@5--> process).
+        Defaults to what you looked at recently in this session; pass known=[] to start fresh. Always fits
         an adaptive budget by default (set token_budget to override); each item carries a 'why' and an expand handle. Reports truncation and index version."""
-        return context.render(context.task_context(app.ix, app.atlas, task, scope, token_budget, include_source,
-                                                   max_symbols))
+        anchors, source = app.known_anchors(known)
+        r = context.task_context(app.ix, app.atlas, task, scope, token_budget, include_source, max_symbols,
+                                 known=anchors, known_source=source)
+        for it in r["items"][:3]:
+            if it.get("source"):
+                app.working.note_symbol(it)
+        return context.render(r)
+
+    @tool
+    def connections(target: Union[str, list[str]], known: Optional[list[str]] = None, max_hops: int = 6,
+                    limit: int = 4) -> str:
+        """How what you already know links to what you want to know: the shortest labelled routes (calls, callback
+        registrations, class membership, file containment, imports, env/table/config relationships) from the
+        `known` symbols or files to each `target`, every hop anchored to path:line
+        (login --calls@134--> rotateRefreshToken; A <--calls@12-- B means B calls A). known defaults to what you
+        looked at recently in this session (symbol, symbol_source, file_outline, references, impact, edits,
+        task_context results). Use it for "how does A reach B", "how is this handler wired to that query", or to
+        place a symbol you just found relative to code you already understand. Lists the symbols on the way (open
+        them to follow the route) and says when no route exists within max_hops. limit = distinct routes per target."""
+        anchors, source = app.known_anchors(known)
+        return connect.render(connect.connections(app.ix, app.atlas, target, anchors, max_hops=max_hops, limit=limit,
+                                                  known_source=source))
 
     @tool
     def change_context(base_ref: str = "HEAD", include_untracked: bool = True, depth: int = 3,
@@ -246,6 +295,7 @@ def build_server(app: App):
         o = app.atlas.outline(path, include_private)
         if o is None:
             return f"file not indexed: {path} (unsupported language, ignored, or wrong path; try list_files)"
+        app.working.note_file(o["path"])
         return fmt.outline(o, show_imports)
 
     @tool
@@ -258,12 +308,18 @@ def build_server(app: App):
     def symbol(name: str, path: Optional[str] = None) -> str:
         """Everything about one symbol: location, signature, doc, complexity, members, callers, callees.
         name may be plain (foo), qualified (Class.foo) or path:line. Use path= to disambiguate."""
-        return fmt.symbol_detail(app.atlas.symbol_detail(name, path))
+        d = app.atlas.symbol_detail(name, path)
+        if d.get("found"):
+            app.working.note_symbol(d)
+        return fmt.symbol_detail(d)
 
     @tool
     def symbol_source(target: str, path: Optional[str] = None, context: int = 0, max_lines: int = 400) -> str:
         """Source text of one symbol (or path:start-end range) with line numbers. Cheaper than reading the file."""
-        return fmt.source(app.atlas.source(target, path, context, max_lines))
+        r = app.atlas.source(target, path, context, max_lines)
+        if r.get("found"):
+            app.remember(r["path"], r["start"] + context)
+        return fmt.source(r)
 
     @tool
     def references(name: str, kind: Optional[str] = None, limit: int = 150, exclude_tests: bool = False,
@@ -271,19 +327,29 @@ def build_server(app: App):
         """Every place a name is used, grouped by file with line numbers and enclosing symbol. When path (or a
         qualified name) pins one definition, only references resolving to it are listed. Reports the true total,
         how many are shown, and a next offset for continuation. kind: call | new | arg | ref | import."""
-        return fmt.references(app.atlas.references(name, kind, limit, exclude_tests, path, offset))
+        r = app.atlas.references(name, kind, limit, exclude_tests, path, offset)
+        if r.get("resolved_to") and r["definitions"]:
+            d = r["definitions"][0]
+            app.working.note_symbol({"path": d["path"], "start_line": d["line"], "qualified": d["qualified"]})
+        return fmt.references(r)
 
     @tool
     def impact(name: str, path: Optional[str] = None, depth: int = 3) -> str:
         """Blast radius: transitive callers of a symbol up to depth hops, affected files and tests. Run before
         changing a signature or behaviour."""
-        return fmt.impact(app.atlas.impact(name, path, depth))
+        d = app.atlas.impact(name, path, depth)
+        if d.get("found"):
+            app.working.note_symbol(d["root"])
+        return fmt.impact(d)
 
     @tool
     def triggers(name: str, path: Optional[str] = None) -> str:
         """What causes a symbol to run: route/event decorators, callback registrations (addEventListener,
         app.get, subscribe...), direct callers, owning class. Answers 'what triggers what'."""
-        return fmt.triggers(app.atlas.triggers(name, path))
+        d = app.atlas.triggers(name, path)
+        if d.get("found"):
+            app.working.note_symbol(d["symbol"])
+        return fmt.triggers(d)
 
     @tool
     def dependencies(path: str) -> str:
@@ -327,6 +393,8 @@ def build_server(app: App):
         errors (force=True overrides). Pass expected_hash (old_hash from a previous call) to guard against
         concurrent changes. Returns old text + hashes; re-indexes immediately. dry_run previews."""
         r = edits.replace_symbol(app.atlas, name, new_text, path, dry_run, expected_hash, force)
+        if r.get("ok"):
+            app.remember(r["path"], int(str(r.get("replaced_lines", "0")).split("-")[0] or 0) or None)
         return json.dumps(r, indent=1)
 
     @tool(group="edit")
@@ -334,7 +402,10 @@ def build_server(app: App):
                     dry_run: bool = False, force: bool = False) -> str:
         """Insert new_text on its own lines before or after an existing symbol (where='before'|'after'), matching
         its indentation. Parse-validated before writing."""
-        return json.dumps(edits.insert_relative(app.atlas, name, new_text, where, path, dry_run, force), indent=1)
+        r = edits.insert_relative(app.atlas, name, new_text, where, path, dry_run, force)
+        if r.get("ok"):
+            app.remember(r["path"], r.get("inserted_at_line"))
+        return json.dumps(r, indent=1)
 
     @tool(group="edit")
     def rename_symbol(name: str, new_name: str, path: Optional[str] = None, dry_run: bool = True,
@@ -342,6 +413,8 @@ def build_server(app: App):
         """Rename a symbol at its definition and every reference that resolves to it (identifier nodes only:
         strings, comments and same-named symbols elsewhere are untouched; ambiguous references are listed and
         skipped). Defaults to dry_run=True: review the plan, then call again with dry_run=False."""
+        for s in app.atlas.resolve_symbol(name, path)[:1]:
+            app.working.note_symbol(s)
         return json.dumps(edits.rename_symbol(app.atlas, name, new_name, path, dry_run, include_tests), indent=1)
 
     # ------------------------------------------------------------------ SNIPE loop
@@ -357,6 +430,9 @@ def build_server(app: App):
         """Take ownership of an issue (state FIXING) and snapshot its files so verify_snipe can measure the patch
         surface. Returns level-1 context (symbol names + ranked candidates)."""
         r = app.snipe.claim(id, agent)
+        if r["ok"]:
+            it = app.snipe.get(id) or {}
+            app.remember(it.get("suspect_path"), it.get("suspect_line"))
         return app.snipe.context(id, 1) if r["ok"] else r["error"]
 
     @tool(group="snipe")
@@ -462,7 +538,8 @@ def build_server(app: App):
     def onboard() -> str:
         """How to work on this repo with CodeAtlas."""
         return ("Use CodeAtlas tools before reading files: task_context, file_outline, symbol, impact, triggers, "
-                "references. Fix work: next_snipe -> claim_snipe -> get_snipe_context -> patch -> verify_snipe -> next.")
+                "references; connections(target, known) for how code you know reaches code you need. "
+                "Fix work: next_snipe -> claim_snipe -> get_snipe_context -> patch -> verify_snipe -> next.")
 
     return mcp
 

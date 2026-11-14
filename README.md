@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="#install"><img alt="install" src="https://img.shields.io/badge/install-one%20line-2ea44f"></a>
-  <a href="#what-it-does"><img alt="tools" src="https://img.shields.io/badge/MCP%20tools-36-7aa2ff"></a>
+  <a href="#what-it-does"><img alt="tools" src="https://img.shields.io/badge/MCP%20tools-39-7aa2ff"></a>
   <a href="#languages"><img alt="languages" src="https://img.shields.io/badge/languages-17-c792ea"></a>
   <a href="#snipe-the-fix-loop"><img alt="snipe" src="https://img.shields.io/badge/fix%20loop-SNIPE-ff6b6b"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey"></a>
@@ -19,7 +19,9 @@
 CodeAtlas indexes a repository with tree-sitter into a symbol graph (functions, classes, references, imports,
 env keys, SQL tables, patterns) and exposes it over MCP as compact, `path:line`-anchored answers. An agent asks
 `task_context("fix expired refresh tokens")` and gets the five symbols that matter, their callers, the test that
-exercises them and the config they read, in ~3k tokens instead of ~30k. The index updates itself within a second of
+exercises them and the config they read, in ~3k tokens instead of ~30k. It also remembers what the agent has
+already looked at and shows how each result connects to it, hop by hop
+(`login --calls@134--> rotateRefreshToken`). The index updates itself within a second of
 every save, and a localhost React dashboard shows the map, the SNIPE board and agent activity live.
 
 ```
@@ -61,7 +63,7 @@ codeatlas init        # writes agents + guidance, idempotent; the index builds i
 | **Claude Code** | plugin `codeatlas@codeatlas` installed at user scope by the installer (or `claude plugin marketplace add 5hihan/codeatlas` + `claude plugin install codeatlas@codeatlas`) | `/codeatlas:find <question>`, `/codeatlas:snipe`, `/codeatlas:review-changes`, or let Claude delegate to the `codeatlas-navigator`, `codeatlas-sniper`, `codeatlas-reviewer` agents. A PreToolUse hook makes Claude actually use the index: in an indexed repo, built-in `Grep`/`Glob` and `grep`/`rg`/`find` in Bash are denied with the CodeAtlas tool to call instead (`CODEATLAS_GUARD=off` disables, `=strict` also redirects whole-file `Read`) |
 | **Codex** | `mcp_servers.codeatlas` in `~/.codex/config.toml` + skill in `~/.agents/skills/codeatlas` | type `$codeatlas` (Codex uses `$`, not `/`); the MCP tools are available in every project |
 | **Cursor** | `codeatlas init cursor` writes `.cursor/mcp.json` in the repo | the MCP tools appear in the agent |
-| **Anything else (MCP)** | `codeatlas serve --repo <path>` over stdio | 36 tools, see below |
+| **Anything else (MCP)** | `codeatlas serve --repo <path>` over stdio | 39 tools, see below |
 
 Manual install from a checkout: `uv tool install .` (or `pipx install .`), then `codeatlas doctor`.
 </details>
@@ -116,7 +118,8 @@ attributed to an unrelated repository symbol.
 
 | Tool | Gives the agent |
 |---|---|
-| `task_context` | **start here**: the symbols relevant to a task (BM25 + PageRank + graph proximity + pattern hints), source for the strongest ones, tests, config/docs, inside an adaptive token budget; each item says why it is there and how to expand it |
+| `task_context` | **start here**: the symbols relevant to a task (BM25 + PageRank + graph proximity + pattern hints), source for the strongest ones, tests, config/docs, inside an adaptive token budget; each item says why it is there and how to expand it. `known=[...]` (or, by default, what the agent looked at in this session) re-ranks results by how they connect to that code and renders the route to each one |
+| `connections` | **how what you know reaches what you want**: shortest labelled routes from known symbols/files to a target through calls, callback registrations, class membership, file containment, imports and env/table/config relationships, every hop a `path:line`; alternative routes, the symbols on the way, and an honest "no route within N hops" |
 | `repo_overview`, `repo_map` | languages, packages, hubs, entry points; the complete symbol map, files ordered by PageRank (pass `token_budget` to get only the top-ranked part) |
 | `file_outline`, `find_symbols`, `symbol`, `symbol_source` | outlines with reference counts and pattern tags; signature, doc, callers, callees; just the lines of one symbol |
 | `references`, `impact`, `triggers`, `dependencies`, `module_graph` | who uses it, what breaks, what makes it run, import graphs |
@@ -124,6 +127,29 @@ attributed to an unrelated repository symbol.
 | `programming_patterns` | 12 patterns (generics, closures, decorators, async, generators, error handling, ...) at real locations with evidence |
 | `change_context` | git blast radius: changed symbols, consumers to re-check, config/schema touched, tests to run, risk |
 | `hotspots`, `unreferenced`, `findings`, `grep` | complexity, dead code, comment tags, regex search |
+
+**Connecting what the agent knows to what it needs.** Agents rarely start from nothing: they have a handler open, a
+failing test, a symbol from the last answer. `task_context(task, known=["login", "routes/auth.ts"])` runs a weighted
+search from those anchors over the resolved graph, so the `process` reachable from `main` outranks a same-named
+`process` in a legacy package, the anchors themselves are not repeated, the symbols that bridge an anchor to a result
+are added, and the answer shows the route as a tree:
+
+```
+## How what you know connects to these
+  main (app/main.py:3)
+    --calls@4--> handle (app/handlers.py:3)
+      --calls@5--> process (app/service.py:4)
+        --calls@7--> Store.save (app/store.py:2)
+  no route within ~6 hops: process (legacy/process.py:1)
+```
+
+The server remembers what each agent session looked at (`symbol`, `symbol_source`, `file_outline`, `references`,
+`impact`, edits, `task_context` results), so this happens by default; `known=[]` starts fresh. The explicit question
+is `connections(target, known)`: `main --calls@4--> handle --calls@5--> process --calls@7--> Store.save`, with
+`A <--calls@12-- B` meaning B calls A, alternative routes (through imports, a shared test, a config file), and the
+symbols on the way with `symbol_source` handles. Routes prefer tight evidence (a resolved call costs 1 hop, "same
+file" 1.6, an import 1.5, medium-confidence edges more), pay extra to pass through hubs such as loggers, and pay a
+little to reverse direction, so straight call chains win over "they share a helper" when both exist.
 
 **Precise editing.** `replace_symbol`, `insert_code`, `rename_symbol` work on syntax-tree spans: neighbours on the
 same line survive, the new file is parsed before it is written, a content hash guards against concurrent edits,
@@ -176,7 +202,8 @@ TOML, INI, SQL, Prisma, GraphQL, protobuf.
 ```
 codeatlas init [claude|codex|cursor|all|auto] [--global]   set up a repo, or the whole machine once
 codeatlas serve [--repo PATH] [--profile nav|edit|snipe|all]  MCP server + watcher + dashboard
-codeatlas context "<task>" | changes [--base REF] | map | overview | outline PATH | symbol NAME | impact NAME
+codeatlas context "<task>" [--known X] | connections TARGET --known X | changes [--base REF] | map | overview
+codeatlas outline PATH | symbol NAME | impact NAME
 codeatlas snipe [board|scan [--run tests]|next|report FILE]  the loop from the shell
 codeatlas plugin export DIR | dashboard --open | open | doctor
 codeatlas hook pretool [--prefix P] [--mode default|search|off]   Claude Code PreToolUse guard (shipped in the plugin)

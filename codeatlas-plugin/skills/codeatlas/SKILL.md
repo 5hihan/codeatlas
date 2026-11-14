@@ -10,7 +10,8 @@ files; every answer carries `path:line` anchors you can open.
 
 | Need | Tool |
 |---|---|
-| start a task, get the relevant symbols with source, tests, config | `task_context(task, scope, token_budget)` |
+| start a task, get the relevant symbols with source, tests, config | `task_context(task, scope, token_budget, known=[what you already understand])` |
+| how does what I know reach what I want (route, hop by hop) | `connections(target, known)`; known defaults to what you looked at |
 | where is X / what is X | `find_symbols`, `symbol`, `symbol_source` |
 | structure of a file | `file_outline` (with reference counts and pattern tags) |
 | who uses it, what breaks | `references`, `impact`, `triggers` |

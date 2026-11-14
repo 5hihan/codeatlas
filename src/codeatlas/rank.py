@@ -6,6 +6,11 @@ are defined in several places distribute the edge weight between definitions
 (preferring definitions in the same file or in files the caller imports).
 The resulting rank is cached in the ``symbol_rank`` table and refreshed lazily
 after the index changes.
+
+The same pass persists every resolved edge in ``symbol_edges`` (source symbol or,
+for module-level code, only the source file; target symbol; kind; confidence; first
+line) so that path queries (:mod:`codeatlas.connect`) can walk the graph without
+resolving references again.
 """
 from __future__ import annotations
 
@@ -20,7 +25,15 @@ RANK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS symbol_rank(symbol_id INTEGER PRIMARY KEY, rank REAL, in_deg INTEGER, out_deg INTEGER);
 CREATE TABLE IF NOT EXISTS file_rank(file_id INTEGER PRIMARY KEY, rank REAL);
 CREATE TABLE IF NOT EXISTS symbol_refs(symbol_id INTEGER PRIMARY KEY, ref_files INTEGER, ref_count INTEGER, confidence TEXT);
+CREATE TABLE IF NOT EXISTS symbol_edges(src INTEGER, src_file INTEGER NOT NULL, dst INTEGER NOT NULL, kind TEXT,
+  confidence TEXT, line INTEGER, count INTEGER);
+CREATE INDEX IF NOT EXISTS idx_edges_src ON symbol_edges(src);
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON symbol_edges(dst);
+CREATE INDEX IF NOT EXISTS idx_edges_src_file ON symbol_edges(src_file);
 """
+
+# ambiguous (low confidence) resolutions with more candidates than this are not useful as path evidence
+EDGE_MAX_LOW_TARGETS = 4
 
 
 def compute_pagerank(ix: Index, damping: float = 0.85, iters: int = 40) -> dict:
@@ -29,13 +42,17 @@ def compute_pagerank(ix: Index, damping: float = 0.85, iters: int = 40) -> dict:
     c = ix.conn
     with ix.lock:
         c.executescript(RANK_SCHEMA)
-        syms = c.execute("SELECT id, name, file_id, kind, exported FROM symbols").fetchall()
+        syms = c.execute("SELECT id, name, file_id, kind, exported, start_line FROM symbols").fetchall()
         if not syms:
             c.execute("DELETE FROM symbol_rank")
             c.execute("DELETE FROM file_rank")
             c.execute("DELETE FROM symbol_refs")
+            c.execute("DELETE FROM symbol_edges")
+            now = str(time.time())
+            ix.set_meta("rank_updated", now)
+            ix.set_meta("edges_version", now)
             c.commit()
-            return {"symbols": 0, "seconds": 0.0}
+            return {"symbols": 0, "edges": 0, "seconds": 0.0}
         id_index = {s["id"]: i for i, s in enumerate(syms)}
         n = len(syms)
         file_info = {r["id"]: (r["lang"], r["path"]) for r in c.execute("SELECT id, lang, path FROM files")}
@@ -57,9 +74,12 @@ def compute_pagerank(ix: Index, damping: float = 0.85, iters: int = 40) -> dict:
         ref_count: dict[int, int] = defaultdict(int)
         best_conf: dict[int, str] = {}
         rank_order = {"high": 3, "medium": 2, "low": 1}
-        q = ("SELECT r.enclosing_id, r.name, r.kind, r.file_id, r.qualifier, COUNT(*) AS cnt FROM refs r "
-             "GROUP BY r.enclosing_id, r.name, r.kind, r.file_id, r.qualifier")
-        for enc, name, kind, fid, qualifier, cnt in c.execute(q):
+        sym_start = {s["id"]: s["start_line"] for s in syms}
+        sym_fid = {s["id"]: s["file_id"] for s in syms}
+        edge_rows: list[tuple] = []
+        q = ("SELECT r.enclosing_id, r.name, r.kind, r.file_id, r.qualifier, COUNT(*) AS cnt, MIN(r.line) AS line "
+             "FROM refs r GROUP BY r.enclosing_id, r.name, r.kind, r.file_id, r.qualifier")
+        for enc, name, kind, fid, qualifier, cnt, line in c.execute(q):
             res = resolver.resolve(name, fid, qualifier, enc, kind)
             if not res.targets or res.confidence is None:
                 continue
@@ -69,6 +89,14 @@ def compute_pagerank(ix: Index, damping: float = 0.85, iters: int = 40) -> dict:
                 ref_count[t] += cnt
                 if rank_order[res.confidence] > rank_order.get(best_conf.get(t, ""), 0):
                     best_conf[t] = res.confidence
+            # persisted edges for path queries: module-level code keeps only its file as the source
+            if res.confidence != "low" or len(res.targets) <= EDGE_MAX_LOW_TARGETS:
+                for t in res.targets:
+                    if t == enc:
+                        continue
+                    if kind == "ref" and sym_fid.get(t) == fid and sym_start.get(t) == line:
+                        continue  # the definition's own name
+                    edge_rows.append((enc, fid, t, kind, res.confidence, line, cnt))
             src = id_index.get(enc) if enc is not None else None
             if src is None:
                 continue
@@ -86,6 +114,13 @@ def compute_pagerank(ix: Index, damping: float = 0.85, iters: int = 40) -> dict:
         c.executemany("INSERT INTO symbol_refs(symbol_id, ref_files, ref_count, confidence) VALUES(?,?,?,?)",
                       [(s["id"], len(ref_files.get(s["id"], ())), ref_count.get(s["id"], 0), best_conf.get(s["id"]))
                        for s in syms])
+        # `from m import foo` yields an import ref and identifier refs (names, module path, aliases) on the same
+        # line: keep the import edges only, so a module called `resolve` never becomes a reference to `X.resolve`
+        import_lines = {(e[1], e[5]) for e in edge_rows if e[3] == "import" and e[0] is None}
+        edge_rows = [e for e in edge_rows if not (e[3] == "ref" and e[0] is None and (e[1], e[5]) in import_lines)]
+        c.execute("DELETE FROM symbol_edges")
+        c.executemany("INSERT INTO symbol_edges(src, src_file, dst, kind, confidence, line, count) VALUES(?,?,?,?,?,?,?)",
+                      edge_rows)
         # file-level import edges contribute a little to top-level symbols too (keeps hubs ranked)
         in_deg = [0] * n
         out_deg = [0] * n
@@ -126,9 +161,11 @@ def compute_pagerank(ix: Index, damping: float = 0.85, iters: int = 40) -> dict:
             frank[file_of[i]] += rank[i]
         c.execute("DELETE FROM file_rank")
         c.executemany("INSERT INTO file_rank(file_id, rank) VALUES(?,?)", list(frank.items()))
-        ix.set_meta("rank_updated", str(time.time()))
+        now = str(time.time())
+        ix.set_meta("rank_updated", now)
+        ix.set_meta("edges_version", now)
         c.commit()
-    return {"symbols": n, "edges": sum(out_deg), "seconds": round(time.time() - t0, 2)}
+    return {"symbols": n, "edges": sum(out_deg), "stored_edges": len(edge_rows), "seconds": round(time.time() - t0, 2)}
 
 
 def rank_is_stale(ix: Index) -> bool:
@@ -136,6 +173,8 @@ def rank_is_stale(ix: Index) -> bool:
     lu = ix.get_meta("last_update")
     if ru is None:
         return True
+    if ix.get_meta("edges_version") != ru:
+        return True  # index built before symbol_edges existed: one recompute fills it
     if lu is None:
         return False
     try:

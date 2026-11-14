@@ -4,6 +4,11 @@ Pipeline
   1. terms from the task text (CamelCase / snake_case split, stop words removed)
   2. candidate symbols by BM25 over an FTS5 index of names, signatures and docs (scope-filtered)
   3. boost by PageRank, scope, exported-ness; penalise tests
+  3b. ``known``: symbols / files / path:line positions the agent has already looked at. A weighted search from
+     them over calls, membership, containment, imports and config relationships (:mod:`codeatlas.connect`)
+     re-ranks candidates by graph proximity, drops the anchors themselves from the answer, adds the symbols
+     that bridge an anchor to a result, and renders the route to each strong result
+     (``main --calls@4--> handle --calls@5--> process``)
   4. expand one hop through the resolved graph (callers / callees) with a discount
   5. tests that reference the selected symbols, config/docs files mentioning the terms
   6. assemble under the budget: signatures for everything, source bodies for the top items,
@@ -111,17 +116,23 @@ def _fts_query(terms: list[str]) -> str:
 
 
 def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None, token_budget: Optional[int] = None,
-                 include_source: bool = True, max_symbols: int = 40, boost: Optional[set[str]] = None) -> dict:
+                 include_source: bool = True, max_symbols: int = 40, boost: Optional[set[str]] = None,
+                 known: Optional[list[str]] = None, known_source: str = "given") -> dict:
     t0 = time.time()
     ensure_rank(ix)
     ensure_fts(ix)
     c = ix.conn
     terms = terms_from(task)
     scope = ix.rel(scope).rstrip("/") if scope and scope.strip() != "." else ""
-    initial_plan = plan_context(ix, task=task, scope=scope, requested_budget=token_budget)
+    if isinstance(known, str):
+        known = [known]
+    known = [k for k in (known or []) if k and str(k).strip()]
+    initial_plan = plan_context(ix, task=task, scope=scope, requested_budget=token_budget,
+                                signals={"known_count": len(known)} if known else None)
     result: dict = {"task": task, "terms": terms, "scope": scope or None, "index_version": ix.get_meta("last_update"),
                     "budget": initial_plan["budget"], "budget_plan": initial_plan,
                     "items": [], "tests": [], "docs": [], "relationships": [],
+                    "known": [], "known_source": known_source if known else None, "paths": [], "unreached": [],
                     "relationships_version": ix.get_meta("relationships_updated"),
                     "truncated": False, "notes": []}
     if not terms:
@@ -222,6 +233,37 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 scores[sid] *= 1.4
                 reasons[sid].append("recently changed (hot)")
 
+    # ---- 1b. what the agent already knows ---------------------------------------------
+    # Candidates close to the known anchors in the connection graph are more likely to be what the task means
+    # (the `process` reachable from `main` beats a same-named `process` in a legacy package).
+    anchor_ids: set[int] = set()
+    anchor_labels: dict = {}
+    exploration = None
+    graph = None
+    if known:
+        from .connect import Graph, explore, resolve_anchors, PROXIMITY_MAX_COST
+        graph = Graph(ix, atlas)
+        anchors, unresolved = resolve_anchors(graph, known)
+        result["known"] = [{"input": inp, **graph.describe(n)} for n, inp in anchors]
+        for u in unresolved:
+            result["notes"].append(f"known item {u['input']!r} not found"
+                                   + (f" (similar: {'; '.join(u['similar'])})" if u.get("similar") else ""))
+        if anchors:
+            anchor_labels = {n: graph.describe(n)["label"] for n, _ in anchors}
+            exploration = explore(graph, [(n, anchor_labels[n]) for n, _ in anchors], max_cost=PROXIMITY_MAX_COST,
+                                  max_nodes=2500, exempt={("s", sid) for sid in scores})
+            anchor_ids = {n[1] for n, _ in anchors if n[0] == "s"}
+            for sid in list(scores):
+                if sid in anchor_ids:
+                    continue
+                d = exploration.distance(("s", sid))
+                if d is None:
+                    continue
+                scores[sid] *= 1.0 + 1.0 * max(0.0, 1.0 - d / exploration.max_cost)
+                p = exploration.path_to(("s", sid))
+                if p:
+                    reasons[sid].insert(0, f"{p.hops} hop{'s' if p.hops != 1 else ''} from {anchor_labels.get(p.nodes[0], 'known')}")
+
     # ---- 2. graph expansion --------------------------------------------------------
     lexical_ids = set(scores)
     seeds = sorted(scores, key=lambda s: -scores[s])[:10]
@@ -239,6 +281,32 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
 
     # ---- 3. tests & docs -------------------------------------------------------------
     top = sorted(scores, key=lambda s: -scores[s])[:max_symbols]
+    bridge_ids: set[int] = set()
+    if anchor_ids:
+        # the agent already has these: do not spend the budget repeating them
+        dropped = [s["qualified"] for s in (atlas.symbol_by_id(x) for x in top if x in anchor_ids) if s]
+        top = [x for x in top if x not in anchor_ids]
+        if dropped:
+            result["notes"].append("already known, not repeated: " + ", ".join(dropped[:6]))
+    if exploration is not None:
+        from .connect import path_dict
+        top_set = set(top)
+        bridges: dict[int, str] = {}
+        for sid in top[:8]:
+            p = exploration.path_to(("s", sid))
+            if p is None:
+                result["unreached"].append(graph.describe(("s", sid)))
+                continue
+            pd = path_dict(graph, p)
+            result["paths"].append(pd)
+            for n in p.nodes[1:-1]:
+                if n[0] == "s" and n[1] not in top_set and n[1] not in anchor_ids and n[1] not in bridges:
+                    bridges[n[1]] = f"links {pd['anchor']['label']} to {pd['target']['label']}"
+        for bid, why in list(bridges.items())[:6]:
+            scores.setdefault(bid, 0.0)
+            reasons[bid] = [why]
+            top.append(bid)
+            bridge_ids.add(bid)
     names = {atlas.symbol_by_id(s)["name"] for s in top[:15] if atlas.symbol_by_id(s)}
     tests: dict[str, set[int]] = defaultdict(set)
     if names:
@@ -263,7 +331,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         "candidate_count": len(scores), "exact_match": any("exact name match" in r for r in reasons.values()),
         "fanout": len(set(scores) - lexical_ids), "relationship_count": len(seen_edges),
         "complexity": max((s.get("complexity", 0) or 0 for s in selected.values() if s), default=0),
-        "test_count": len(tests), "test_relevance": 1.0 if tests else 0.0})
+        "test_count": len(tests), "test_relevance": 1.0 if tests else 0.0, "known_count": len(anchor_labels)})
     result["budget_plan"], result["budget"] = plan, plan["budget"]
     allocations = plan["allocations"]
     used = 0
@@ -287,11 +355,12 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
             break
         item = {"id": sid, "qualified": s["qualified"], "kind": s["kind"], "path": s["path"],
                 "start_line": s["start_line"], "end_line": s["end_line"], "why": why, "signature": sig, "doc": doc,
-                "score": round(scores[sid], 2), "source": None,
+                "score": round(scores[sid], 2), "source": None, "bridge": sid in bridge_ids,
                 "expand": f"symbol_source(\"{s['qualified']}\", path=\"{s['path']}\")"}
         used += cost
-        # source bodies for the strongest items while budget allows (cap 120 lines each)
-        if include_source and len(items) < 12 and s["lines"] <= 160 and source_used < allocations["source"]:
+        # source bodies for the strongest items while budget allows (cap 120 lines each); bridges stay signatures
+        if (include_source and len(items) < 12 and s["lines"] <= 160 and source_used < allocations["source"]
+                and sid not in bridge_ids):
             src = atlas.source(s["qualified"], s["path"], max_lines=120)
             if src.get("found"):
                 scost = estimate_tokens(src["text"])
@@ -381,6 +450,9 @@ def render(r: dict) -> str:
 
     add(f"# Context for: {r['task']}")
     add(f"terms: {', '.join(r['terms'])}" + (f"   scope: {r['scope']}" if r.get("scope") else ""))
+    if r.get("known"):
+        from .connect import _node_text
+        add(f"known ({r.get('known_source') or 'given'}): " + ", ".join(_node_text(k, None) for k in r["known"][:8]))
     if plan:
         stats, inputs = plan["scoped"], plan["inputs"]
         add(f"budget: {policy} ~{budget} tokens; scope {stats['files']} files; "
@@ -398,6 +470,15 @@ def render(r: dict) -> str:
                 block += f"\n  doc: {it['doc']}"
             block += f"\n  expand: {it['expand']}"
             add(block)
+    if r.get("paths") or r.get("unreached"):
+        from .connect import format_route_tree, _node_text, PROXIMITY_MAX_HOPS
+        remaining = int(allocations.get("paths", budget * 0.12) * 3.6)
+        add("\n## How what you know connects to these")
+        for line in format_route_tree(r["paths"]):
+            remaining -= add(f"  {line}", remaining)
+        if r.get("unreached"):
+            remaining -= add(f"  no route within ~{PROXIMITY_MAX_HOPS} hops: "
+                             + ", ".join(_node_text(u, None) for u in r["unreached"][:8]), remaining)
     if r.get("relationships"):
         remaining = int(allocations.get("relationships", budget) * 3.6)
         add("\n## Code / config / schema dependencies")

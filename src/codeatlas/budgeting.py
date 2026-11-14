@@ -2,7 +2,8 @@
 
 ``signals`` can contain candidate_count, exact_match, specificity (0..1), fanout,
 depth, complexity (maximum of relevant symbols), changed_files, relationship_count,
-schema_changes, config_changes, test_count and test_relevance (0..1). File/change
+schema_changes, config_changes, test_count, test_relevance (0..1) and known_count (anchors
+the agent already knows, which reserve a ``paths`` section for the routes to them). File/change
 signals accept a count, a bool, or a collection of paths. The caller supplies facts
 from retrieval; absence is not treated as evidence of zero matches or no tests.
 
@@ -148,7 +149,7 @@ def _specificity(task: str, scope: str, signals: dict, stats: dict) -> tuple[flo
 
 
 def _allocations(budget: int, specificity: float, risk: bool, test_relevance: float,
-                 no_tests: bool, mode: str) -> dict[str, int]:
+                 no_tests: bool, mode: str, paths: bool = False) -> dict[str, int]:
     weights = {"symbols": 0.30, "source": 0.24, "relationships": 0.18,
                "tests": 0.15, "patterns": 0.04, "overhead": 0.09}
     if specificity >= 0.75:
@@ -172,6 +173,13 @@ def _allocations(budget: int, specificity: float, risk: bool, test_relevance: fl
         weights["tests"] -= freed
         weights["symbols"] += freed * 0.6
         weights["relationships"] += freed * 0.4
+    if paths:
+        # routes from the known anchors are evidence, paid for mostly by optional bodies
+        share = 0.10
+        weights["paths"] = share
+        weights["source"] -= min(share * 0.5, max(0.0, weights["source"] - 0.02))
+        weights["symbols"] -= min(share * 0.3, max(0.0, weights["symbols"] - 0.05))
+        weights["relationships"] -= min(share * 0.2, max(0.0, weights["relationships"] - 0.05))
     total = sum(weights.values())
     raw = {name: budget * weight / total for name, weight in weights.items()}
     result = {name: int(value) for name, value in raw.items()}
@@ -208,6 +216,7 @@ def plan_context(ix: Index, *, task: str = "", scope: str | None = None,
     relationships = _count(signals.get("relationship_count"))
     relevant_tests = _count(signals.get("test_count"))
     test_relevance = min(1.0, _number(signals.get("test_relevance")))
+    known = _count(signals.get("known_count"))
     risk_terms = sorted(set(terms) & _RISK_TERMS)
     risk = bool(schema_changes or config_changes or complexity >= 20 or risk_terms)
     reasons: list[str] = []
@@ -238,6 +247,7 @@ def plan_context(ix: Index, *, task: str = "", scope: str | None = None,
     add("risk_terms", 450 if risk_terms else 0, "Task mentions sensitive behavior: " + ", ".join(risk_terms))
     add("tests", min(550, 150 * math.log2(1 + relevant_tests)) + 250 * test_relevance,
         "Relevant tests need room for verification")
+    add("known", min(450, 150 * math.log2(1 + known)), f"Routes from {known:,} known anchor(s) need room")
     automatic = max(AUTO_MIN, min(AUTO_MAX, int(math.ceil((base + sum(contributions.values())) / 100) * 100)))
     policy = "explicit" if requested_budget is not None else "auto"
     budget = int(requested_budget) if requested_budget is not None else automatic
@@ -247,14 +257,16 @@ def plan_context(ix: Index, *, task: str = "", scope: str | None = None,
         reasons.insert(0, f"Automatic budget is bounded to {AUTO_MIN:,}–{AUTO_MAX:,} tokens; base for {mode} is {base:,}.")
     return {"budget": budget, "policy": policy,
             "allocations": _allocations(budget, specificity, risk, test_relevance,
-                                         signals.get("test_count") is not None and relevant_tests == 0, mode),
-            "allocation_order": ["symbols", "relationships", "tests", "patterns", "source"],
+                                         signals.get("test_count") is not None and relevant_tests == 0, mode,
+                                         paths=known > 0),
+            "allocation_order": (["symbols", "paths"] if known else ["symbols"]) + ["relationships", "tests", "patterns", "source"],
             "reasons": reasons, "repo": repo, "scoped": scoped, "scope": normalized or None,
             "inputs": {"mode": mode, "specificity": round(specificity, 3), "terms": terms,
                        "candidate_count": candidates, "fanout": fanout, "depth": depth,
                        "complexity": complexity, "changed_files": changed, "relationship_count": relationships,
                        "schema_changes": schema_changes, "config_changes": config_changes,
                        "test_count": relevant_tests, "test_relevance": test_relevance, "risk_terms": risk_terms,
+                       "known_count": known,
                        "index_version": version[0], "relationships_version": version[1],
                        "stats_cache_hit": cache_hit, "contributions": contributions,
                        "automatic_budget": automatic},
