@@ -153,8 +153,10 @@ def test_tool_annotations_and_always_load(repo: Path):
     async def go():
         tools = {t.name: t for t in await mcp.list_tools()}
         always = {n for n, t in tools.items() if (t.meta or {}).get("anthropic/alwaysLoad")}
-        assert always == set(ALWAYS_LOAD) and {"task_context", "connections", "file_outline", "symbol_source"} <= always
-        assert 4 <= len(always) <= 8, "a handful of upfront tools: the rest stay deferred"
+        assert always == set(ALWAYS_LOAD) and {"task_context", "file_outline", "symbol_source", "find_symbols"} <= always
+        assert 3 <= len(always) <= 5, "the documented 3-5 upfront tools: the rest stay deferred"
+        upfront = sum(len(json.dumps({"n": t.name, "d": t.description, "s": t.input_schema})) for n, t in tools.items() if n in always)
+        assert upfront / 3.6 < 1200, f"always-on schema cost must stay about a thousand tokens, got ~{upfront / 3.6:.0f}"
         for name in ("task_context", "connections", "symbol", "references", "impact", "grep", "next_snipe", "snipe_board"):
             a = tools[name].annotations
             assert a.read_only_hint and a.idempotent_hint and not a.destructive_hint and a.open_world_hint is False, name
@@ -192,3 +194,28 @@ def test_plugin_manifest_marketplace_and_evals(tmp_path: Path):
     for f in files:
         rel = Path(f).relative_to(tmp_path / "plugin")
         assert (repo_plugin / rel).read_text(encoding="utf-8") == Path(f).read_text(encoding="utf-8"), rel
+
+
+def test_compact_symbol_and_impact_fold_hubs_only(tmp_path: Path):
+    lines = ["class Hub:"] + [f"    def m{i}(self):\n        return {i}" for i in range(20)]
+    lines += [f"def caller{i}():\n    return Hub().m0()" for i in range(30)]
+    lines += ["def leaf():\n    return 1", "def one_caller():\n    return leaf()"]
+    (tmp_path / "pkg.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ix = Index(tmp_path)
+    ix.update()
+    atlas = Atlas(ix)
+    hub = atlas.symbol_detail("Hub")
+    full, compact = fmt.symbol_detail(hub), fmt.symbol_detail(hub, compact=True)
+    assert len(compact) < len(full) * 0.7
+    assert "… 8 more: file_outline" in compact and 'symbol("Hub", full=True)' in compact
+    assert "m19" in full and "m19" not in compact
+    assert "pkg.py: caller" in compact, "callers beyond ten are grouped by file"
+    assert "called by (30)" in compact and "called by (30)" in full
+    small = atlas.symbol_detail("leaf")
+    assert fmt.symbol_detail(small, compact=True) == fmt.symbol_detail(small), "small symbols are untouched"
+    im = atlas.impact("Hub.m0")
+    full_i, compact_i = fmt.impact(im), fmt.impact(im, compact=True)
+    assert len(compact_i) < len(full_i) * 0.7 and "pkg.py: caller" in compact_i and 'impact("Hub.m0"' in compact_i
+    small_i = atlas.impact("leaf")
+    assert fmt.impact(small_i, compact=True) == fmt.impact(small_i)
+    ix.close()

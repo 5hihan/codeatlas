@@ -43,8 +43,8 @@ snipe into a refactor."""
 
 # Tools kept in Claude's context from the start (Claude Code defers the other MCP tool schemas behind a search):
 # the ones an agent reaches for first, so the first useful call needs no search round-trip.
-ALWAYS_LOAD = frozenset(os.environ.get("CODEATLAS_ALWAYS_LOAD", "task_context,connections,find_symbols,symbol,"
-                                       "file_outline,symbol_source").split(","))
+ALWAYS_LOAD = frozenset(os.environ.get("CODEATLAS_ALWAYS_LOAD",
+                                       "task_context,find_symbols,symbol,file_outline,symbol_source").split(","))
 
 
 class App:
@@ -239,14 +239,12 @@ def build_server(app: App):
     @tool
     def task_context(task: str, scope: Optional[str] = None, token_budget: Optional[int] = None, include_source: bool = True,
                      max_symbols: int = 40, known: Optional[list[str]] = None) -> str:
-        """One call to start a task: the symbols relevant to the task text (BM25 over names/signatures/docs,
-        boosted by PageRank and graph proximity), with source for the strongest ones, plus tests and config/docs
-        that mention the terms. scope limits to a path prefix (e.g. "backend/src/services"). known = symbols,
-        files or path:line positions you already understand: results are re-ranked by how closely they connect to
-        them, the anchors themselves are not repeated, symbols that bridge them to a result are added, and a
-        section shows the route from each anchor to the results (main --calls@4--> handle --calls@5--> process).
-        Defaults to what you looked at recently in this session; pass known=[] to start fresh. Always fits
-        an adaptive budget by default (set token_budget to override); each item carries a 'why' and an expand handle. Reports truncation and index version."""
+        """Start here for any task: the symbols relevant to the task text (stemmed search over names, signatures,
+        docs and module names, boosted by PageRank and graph proximity), source for the strongest ones, tests and
+        config/docs mentioning the terms, in one adaptive-budget answer with path:line anchors. scope limits to a
+        path prefix. known = symbols, files or path:line you already understand (defaults to what you looked at
+        this session; known=[] starts fresh): results are ranked by how they connect to it and the route to each is
+        shown (main --calls@4--> handle --calls@5--> process). Each item says why it is there."""
         anchors, source = app.known_anchors(known)
         r = context.task_context(app.ix, app.atlas, task, scope, token_budget, include_source, max_symbols,
                                  known=anchors, known_source=source)
@@ -258,14 +256,12 @@ def build_server(app: App):
     @tool
     def connections(target: Union[str, list[str]], known: Optional[list[str]] = None, max_hops: int = 6,
                     limit: int = 4) -> str:
-        """How what you already know links to what you want to know: the shortest labelled routes (calls, callback
-        registrations, class membership, file containment, imports, env/table/config relationships) from the
-        `known` symbols or files to each `target`, every hop anchored to path:line
-        (login --calls@134--> rotateRefreshToken; A <--calls@12-- B means B calls A). known defaults to what you
-        looked at recently in this session (symbol, symbol_source, file_outline, references, impact, edits,
-        task_context results). Use it for "how does A reach B", "how is this handler wired to that query", or to
-        place a symbol you just found relative to code you already understand. Lists the symbols on the way (open
-        them to follow the route) and says when no route exists within max_hops. limit = distinct routes per target."""
+        """How what you know reaches what you want: the shortest labelled routes from known symbols/files to each
+        target through calls, callback registrations, class membership, file containment, imports and
+        env/table/config relationships, every hop a path:line (A --calls@12--> B; A <--calls@12-- B means B calls
+        A). known defaults to what you looked at this session. Use it for "how does A reach B" or to place a symbol
+        you just found relative to code you understand. Lists the symbols on the way and says when no route exists
+        within max_hops; limit = distinct routes per target."""
         anchors, source = app.known_anchors(known)
         return connect.render(connect.connections(app.ix, app.atlas, target, anchors, max_hops=max_hops, limit=limit,
                                                   known_source=source))
@@ -323,13 +319,15 @@ def build_server(app: App):
         return fmt.symbol_list(app.atlas.find_symbols(query, kind, path, limit))
 
     @tool
-    def symbol(name: str, path: Optional[str] = None) -> str:
+    def symbol(name: str, path: Optional[str] = None, full: bool = False) -> str:
         """Everything about one symbol: location, signature, doc, complexity, members, callers, callees.
-        name may be plain (foo), qualified (Class.foo) or path:line. Use path= to disambiguate."""
+        name may be plain (foo), qualified (Class.foo) or path:line. Use path= to disambiguate. Hubs are folded
+        (12 members, callers grouped by file, 20 callees, each fold naming the call that lists the rest); full=True
+        lists everything."""
         d = app.atlas.symbol_detail(name, path)
         if d.get("found"):
             app.working.note_symbol(d)
-        return fmt.symbol_detail(d)
+        return fmt.symbol_detail(d, compact=not full)
 
     @tool
     def symbol_source(target: str, path: Optional[str] = None, context: int = 0, max_lines: int = 400) -> str:
@@ -340,7 +338,7 @@ def build_server(app: App):
         return fmt.source(r)
 
     @tool
-    def references(name: str, kind: Optional[str] = None, limit: int = 150, exclude_tests: bool = False,
+    def references(name: str, kind: Optional[str] = None, limit: int = 100, exclude_tests: bool = False,
                    path: Optional[str] = None, offset: int = 0) -> str:
         """Every place a name is used, grouped by file with line numbers and enclosing symbol. When path (or a
         qualified name) pins one definition, only references resolving to it are listed. Reports the true total,
@@ -352,13 +350,13 @@ def build_server(app: App):
         return fmt.references(r)
 
     @tool
-    def impact(name: str, path: Optional[str] = None, depth: int = 3) -> str:
+    def impact(name: str, path: Optional[str] = None, depth: int = 3, full: bool = False) -> str:
         """Blast radius: transitive callers of a symbol up to depth hops, affected files and tests. Run before
-        changing a signature or behaviour."""
+        changing a signature or behaviour. Crowded depth levels are grouped by file; full=True lists every symbol."""
         d = app.atlas.impact(name, path, depth)
         if d.get("found"):
             app.working.note_symbol(d["root"])
-        return fmt.impact(d)
+        return fmt.impact(d, compact=not full)
 
     @tool
     def triggers(name: str, path: Optional[str] = None) -> str:

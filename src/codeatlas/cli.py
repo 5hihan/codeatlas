@@ -17,9 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
-import webbrowser
 from pathlib import Path
 from typing import Optional
 
@@ -189,6 +187,7 @@ def cmd_dashboard(args) -> None:
     url = app.dashboard.url if app.dashboard else None
     print(f"dashboard: {url}")
     if args.open and url:
+        import webbrowser
         webbrowser.open(url)
     if app.dashboard and app.dashboard.reused:
         print("(already running in another process; nothing to do)")
@@ -206,6 +205,7 @@ def cmd_open(args) -> None:
     if info.exists():
         url = json.loads(info.read_text()).get("url")
         print(url)
+        import webbrowser
         webbrowser.open(url)
     else:
         print("no running dashboard for this repo; start `codeatlas serve` or `codeatlas dashboard --open`")
@@ -230,6 +230,7 @@ itself on every file change. Dashboard: see `index_status`.
 
 
 def _server_command(repo: Path) -> tuple[str, list[str]]:
+    import shutil
     exe = shutil.which("codeatlas")
     if exe:
         return exe, ["serve", "--repo", str(repo)]
@@ -336,6 +337,7 @@ def cmd_plugin(args) -> None:
 
 # ------------------------------------------------------------------ init (project) / init --global (machine)
 def detect_agents() -> dict[str, bool]:
+    import shutil
     home = Path.home()
     return {"claude": bool(shutil.which("claude")) or (home / ".claude").exists(),
             "codex": bool(shutil.which("codex")) or (home / ".codex").exists(),
@@ -344,6 +346,7 @@ def detect_agents() -> dict[str, bool]:
 
 def setup_global(msgs: list[str]) -> None:
     """One-time machine setup: the Claude Code plugin (agents + MCP server) or a user-scope server, Codex global."""
+    import shutil
     home = Path.home()
     exe = shutil.which("codeatlas") or sys.executable
     args = ["serve"] if exe.endswith(("codeatlas", "codeatlas.exe", "codeatlas.EXE")) else ["-m", "codeatlas", "serve"]
@@ -461,6 +464,7 @@ def cmd_hook(args) -> None:
 
 
 def cmd_doctor(args) -> None:
+    import shutil
     ok = True
     print(f"codeatlas {__version__} / python {sys.version.split()[0]}")
     try:

@@ -212,11 +212,12 @@ codeatlas hook pretool [--prefix P] [--mode default|search|off]   Claude Code Pr
 ## Built for how Claude Code loads tools
 
 Claude Code defers MCP tool schemas behind a tool search and shows the model only tool names plus the server's
-instructions at session start. CodeAtlas works with that: the six tools an agent reaches for first
-(`task_context`, `connections`, `find_symbols`, `symbol`, `file_outline`, `symbol_source`) are flagged
-`anthropic/alwaysLoad` so the first useful call needs no search round-trip (`CODEATLAS_ALWAYS_LOAD` overrides the
-list), every navigation tool carries `readOnlyHint`/`idempotentHint` so Claude Code runs them in parallel with other
-read-only calls, and the server instructions stay inside the 4,096-character cap. A SessionStart hook adds about 270
+instructions at session start. CodeAtlas works with that: the five tools an agent reaches for first
+(`task_context`, `find_symbols`, `symbol`, `file_outline`, `symbol_source`) are flagged `anthropic/alwaysLoad` so the
+first useful call needs no search round-trip, at about 1,100 tokens of schemas upfront (`CODEATLAS_ALWAYS_LOAD`
+overrides the list; the other 34 tools cost only their names, about 640 tokens with the instructions), every
+navigation tool carries `readOnlyHint`/`idempotentHint` so Claude Code runs them in parallel with other read-only
+calls, and the server instructions stay inside the 4,096-character cap. A SessionStart hook adds about 270
 tokens of orientation (index size, which tool to reach for) at startup, resume and `/clear`, and a 125-token reminder
 after every compaction, when models otherwise forget the index exists. A PreToolUse hook auto-approves CodeAtlas's
 own read-only tools, so a query of the index never shows a permission prompt; edits, SNIPE state changes and anything
@@ -224,6 +225,30 @@ that runs tests still ask (`CODEATLAS_AUTO_APPROVE=off` turns the approval off).
 `claude plugin eval` cases (a navigation question that must be answered with path:line evidence through CodeAtlas
 tools, and a non-code question that must not call them) so the with/without-plugin delta can be measured on every
 change.
+
+### Tool outputs, 0.1.2 to 0.1.3, on identical inputs
+
+Default output of each tool on fixed targets in three repositories (this one, fastapi at 135k lines, hono at 95k
+lines), estimated at 3.6 characters per token with the same estimator for both versions; the "before" column is
+the 0.1.2 code run against the same index.
+
+| Default output | 0.1.2 | 0.1.3 | Change |
+|---|---:|---:|---:|
+| `task_context`, 9 tasks | 39,130 | 28,323 | **-28%** |
+| `symbol`, 12 symbols (hubs folded: 12 members, callers grouped by file, 20 callees) | 8,496 | 6,364 | **-25%** |
+| `file_outline`, 9 files (over 60 symbols summarised) | 19,867 | 15,851 | **-20%** |
+| `impact`, 9 symbols (crowded levels grouped by file) | 6,322 | 5,391 | **-15%** |
+| `references`, 9 names (default limit 100, total and next offset still reported) | 3,593 | 3,305 | **-8%** |
+| `repo_overview`, `repo_map(2000)` | 7,928 | 7,928 | 0% |
+| all 36 measurements | 85,336 | 67,162 | **-21%** |
+
+No single measurement got larger. The biggest single savings are hubs: `fastapi/routing.py` outline 6,131 to 2,885,
+`FastAPI` symbol 1,371 to 744, `Context` (hono) 1,252 to 810. Precision moved the other way on the same nine
+tasks: the expected answer is in the top five results for 9/9 (was 7/9), mean reciprocal rank 0.54 to 0.72. Every
+fold names the call that lists the rest (`full=True`, `file_outline`, `references`), so nothing is hidden, only
+deferred. The hooks cost about 40 ms per tool call (20 ms of it Python start-up) and add nothing to the transcript
+unless they deny or orient. These are local estimates of tool output, not Claude's usage report; the
+`codeatlas-plugin/evals/` cases exist to measure the with/without-plugin delta with `claude plugin eval`.
 
 ## The guard: advice becomes a rule
 

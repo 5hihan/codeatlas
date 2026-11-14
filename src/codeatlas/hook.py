@@ -52,11 +52,13 @@ SEARCH_CMDS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "ug", "ugrep", "git-
 LIST_CMDS = {"find", "fd", "fdfind"}
 CAT_CMDS = {"cat", "bat", "type", "less", "more"}  # whole-file dumps; head/tail/sed -n are partial and pass
 INPLACE_CMDS = {"sed", "gsed", "perl", "awk"}      # with -i: in-place rewrite
-# languages the indexer parses; anything else (docs, json, lock files) is never gated. Derived from the language
-# table so the guard and the index always agree (languages.py imports nothing heavy; grammars load lazily).
-from .languages import EXT_TO_LANG  # noqa: E402
-
-SOURCE_EXT = frozenset(EXT_TO_LANG)
+# languages the indexer parses; anything else (docs, json, lock files) is never gated. A static copy of
+# languages.EXT_TO_LANG (a test keeps them equal): this module runs on every tool call and must import nothing it
+# does not need.
+SOURCE_EXT = frozenset("""
+.bash .c .cc .cjs .cpp .cs .cts .cu .cxx .gemspec .go .h .hh .hpp .hxx .ipp .java .js .jsx .kt .kts .lua .mjs .mts
+.php .py .pyi .rake .rb .rs .sc .scala .sh .swift .ts .tsx .zsh
+""".split())
 # an Edit inside a declaration up to this long is sent through replace_symbol; longer ones may use Edit
 EDIT_SYMBOL_MAX_LINES = 150
 # a Read of an indexed file must be a bounded window: an explicit limit of at most this many lines

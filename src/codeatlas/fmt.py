@@ -158,7 +158,30 @@ def symbol_list(rows: Iterable[dict], header: str = "") -> str:
     return "\n".join(L) if L else "(no matches)"
 
 
-def symbol_detail(d: dict) -> str:
+COMPACT_MEMBERS_DETAIL = 12   # members listed for a class before folding (compact symbol detail)
+COMPACT_CALLERS = 10          # callers listed one per line before grouping by file
+COMPACT_CALLEES = 20
+
+
+def _grouped(rows: list[dict], max_files: int, total_label: str, more: str, per_file: int = 8) -> list[str]:
+    """``path: a@12, b@40 (+N more)`` per file, most call sites first, capped; one handle lists the full set."""
+    by_file: dict[str, list[str]] = {}
+    for r in rows:
+        by_file.setdefault(r["path"], []).append(f"{(r.get('qualified') or '<top-level>').rsplit('.', 1)[-1]}@{r['line']}")
+    files = sorted(by_file.items(), key=lambda kv: -len(kv[1]))
+    L = [f"    {p}: {', '.join(v[:per_file])}{f' (+{len(v) - per_file} more)' if len(v) > per_file else ''}"
+         for p, v in files[:max_files]]
+    folded = len(files) > max_files or any(len(v) > per_file for _, v in files[:max_files])
+    if len(files) > max_files:
+        L.append(f"    +{len(files) - max_files} more files")
+    if folded:
+        L.append(f"    full list of {total_label}: {more}")
+    return L
+
+
+def symbol_detail(d: dict, compact: bool = False) -> str:
+    """One symbol. ``compact`` folds hubs: members beyond COMPACT_MEMBERS_DETAIL, callers grouped by file beyond
+    COMPACT_CALLERS, callees capped; each fold names the call that lists the rest."""
     if not d.get("found"):
         return "Symbol not found." + ("\nSimilar:\n" + symbol_list(d["similar"]) if d.get("similar") else "")
     L = [f"{KIND_ICON.get(d['kind'], '?')} {d['qualified']}  {d['path']}:{d['start_line']}-{d['end_line']}  "
@@ -175,18 +198,27 @@ def symbol_detail(d: dict) -> str:
         L.append("  other definitions with this name: " + "; ".join(
             f"{a['qualified']} {a['path']}:{a['line']}" for a in d["ambiguous"]))
     if d.get("children"):
-        L.append(f"  members ({len(d['children'])}):")
-        L += [f"    {KIND_ICON.get(c['kind'], '?')} {_sig(c, 90)}  :{c['start_line']}" for c in d["children"][:40]]
+        kids = d["children"]
+        shown = kids[:COMPACT_MEMBERS_DETAIL] if compact else kids[:40]
+        L.append(f"  members ({len(kids)}):")
+        L += [f"    {KIND_ICON.get(c['kind'], '?')} {_sig(c, 90)}  :{c['start_line']}" for c in shown]
+        if len(kids) > len(shown):
+            L.append(f"    … {len(kids) - len(shown)} more: file_outline(\"{d['path']}\") or symbol(\"{d['qualified']}\", full=True)")
     if d.get("callers"):
-        L.append(f"  called by ({len(d['callers'])}):")
-        L += [f"    {c['qualified']}  {c['path']}:{c['line']}" + (f"  [{c['via']}]" if c['via'] != 'call' else "")
-              + ("  (medium confidence)" if c.get("confidence") == "medium" else "")
-              for c in d["callers"][:25]]
+        callers = d["callers"]
+        L.append(f"  called by ({len(callers)}):")
+        if compact and len(callers) > COMPACT_CALLERS:
+            L += _grouped(callers, 12, "callers", f"references(\"{d['qualified']}\", path=\"{d['path']}\")")
+        else:
+            L += [f"    {c['qualified']}  {c['path']}:{c['line']}" + (f"  [{c['via']}]" if c['via'] != 'call' else "")
+                  + ("  (medium confidence)" if c.get("confidence") == "medium" else "")
+                  for c in callers[:25]]
     else:
         L.append("  called by: (no internal callers found - entry point, exported API, dynamic dispatch, or dead code)")
     if d.get("callees"):
         parts = []
-        for c in d["callees"][:30]:
+        callees = d["callees"][:COMPACT_CALLEES] if compact else d["callees"][:30]
+        for c in callees:
             t = c.get("target")
             if t and t.get("path"):
                 parts.append(f"{c['name']}→{t['path']}:{t['line']}")
@@ -194,6 +226,8 @@ def symbol_detail(d: dict) -> str:
                 parts.append(f"{(c['qualifier'] + '.') if c.get('qualifier') else ''}{c['name']}?{t['resolution']}")
             else:
                 parts.append(f"{(c['qualifier'] + '.') if c.get('qualifier') else ''}{c['name']}")
+        if len(d["callees"]) > len(callees):
+            parts.append(f"+{len(d['callees']) - len(callees)} more (symbol_source)")
         L.append("  calls: " + ", ".join(parts))
     L += _pattern_hints(d.get("patterns", {}))
     return "\n".join(L)
@@ -218,7 +252,11 @@ def references(r: dict) -> str:
     return "\n".join(L)
 
 
-def impact(d: dict) -> str:
+COMPACT_IMPACT_LEVEL = 12     # affected symbols listed one per line per depth before grouping by file
+
+
+def impact(d: dict, compact: bool = False) -> str:
+    """Blast radius. ``compact`` groups a crowded depth level by file (``path: a@12, b@40``)."""
     if not d.get("found"):
         return "Symbol not found." + ("\nSimilar:\n" + symbol_list(d["similar"]) if d.get("similar") else "")
     r = d["root"]
@@ -226,6 +264,9 @@ def impact(d: dict) -> str:
          f"{d['affected_symbols']} symbols in {d['affected_files']} files within {d['depth']} hops"]
     for lvl, items in d["levels"].items():
         L.append(f"  depth {lvl} ({len(items)}):")
+        if compact and len(items) > COMPACT_IMPACT_LEVEL:
+            L += _grouped(items, 10, "affected", f"impact(\"{r['qualified']}\", path=\"{r['path']}\", full=True)")
+            continue
         L += [f"    {i['qualified']}  {i['path']}:{i['line']}" for i in items[:25]]
         if len(items) > 25:
             L.append(f"    ... {len(items) - 25} more")
