@@ -24,6 +24,7 @@ from collections import defaultdict
 from typing import Iterable, Optional
 
 from .graph import Atlas, is_example_path, is_test_path
+from .languages import CLASS_KINDS
 from .indexer import Index
 from .rank import ensure_rank, estimate_tokens
 from .budgeting import plan_context
@@ -276,6 +277,10 @@ _TASK_Q = re.compile(r"\b(fix|implement|add|change|refactor|debug|rewrite|extend
                      r"how is|how are|explain|understand|walk me through|make|write|update|rename|remove|replace|trace)\b", re.I)
 
 
+_FLOW_Q = re.compile(r"\b(how (does|do|is|are)|flow|reach(es)?|path from|goes from|get from|end to end|walk me through|trace)\b", re.I)
+_CTOR_NAMES = ("__init__", "constructor", "init", "__new__", "new", "initialize")
+
+
 def wants_source(task: str) -> bool:
     """Bodies by default only for tasks and "how does it work" questions.
 
@@ -463,17 +468,81 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     # ---- 2. graph expansion --------------------------------------------------------
     lexical_ids = set(scores)
     seeds = sorted(scores, key=lambda s: -scores[s])[:10]
+    flow_question = include_source and bool(_FLOW_Q.search(task))
+
+    def constructor_of(sym: dict) -> Optional[dict]:
+        """Constructing a class runs its constructor: the work of `Foo(...)` is in Foo.__init__ / constructor."""
+        if sym["kind"] not in CLASS_KINDS:
+            return None
+        row = c.execute("SELECT id FROM symbols WHERE parent_id=? AND name IN (%s) ORDER BY start_line LIMIT 1"
+                        % ",".join("?" * len(_CTOR_NAMES)), (sym["id"], *_CTOR_NAMES)).fetchone()
+        return atlas.symbol_by_id(row[0]) if row else None
+
+    best_score = scores[seeds[0]] if seeds else 0.0
+    path_ids: set[int] = set()   # nodes reached as a flow question's route: kept out of the per-file diversity penalty
+
+    def with_nested(sid: int) -> list[int]:
+        """*sid* plus the closures defined inside it: a decorator factory's `decorator`, a handler's inner `app`.
+        The indexer records them as separate symbols, so the calls they make would otherwise not count as the
+        outer function's calls."""
+        s = atlas.symbol_by_id(sid)
+        if not s:
+            return [sid]
+        rows = c.execute("SELECT s2.id FROM symbols s2 JOIN files f ON f.id=s2.file_id WHERE f.path=? AND s2.id!=? "
+                         "AND s2.start_line>=? AND s2.end_line<=? AND s2.kind IN ('function','method') LIMIT 6",
+                         (s["path"], sid, s["start_line"], s["end_line"])).fetchall()
+        return [sid] + [r[0] for r in rows]
+
+    def expand_callees(sid: int, add_score: float, hop: int) -> list[int]:
+        """Score the resolved callees of *sid* (and the constructor of a constructed class); return all of them,
+        existing or new, so a further hop can continue through lexical hits as well."""
+        targets_all = []
+        src = atlas.symbol_by_id(sid)
+        nested = with_nested(sid)
+        callees = [ce for nid in nested for ce in atlas.callees(nid, limit=12, resolve_as=sid)]
+        for ce in callees:
+            t = ce.get("target")
+            if not (t and t.get("id")):
+                continue
+            targets = [(t["id"], add_score)]
+            ctor = constructor_of(atlas.symbol_by_id(t["id"]) or {"kind": None})
+            if ctor:
+                # constructing a class runs its constructor, and what the constructor calls is part of the same hop
+                targets.append((ctor["id"], add_score))
+                for inner in atlas.callees(ctor["id"], limit=12):
+                    ti = inner.get("target")
+                    if ti and ti.get("id"):
+                        targets.append((ti["id"], add_score * 0.9))
+            for tid, sc in targets:
+                if tid in nested:
+                    continue
+                why = f"called by {src['qualified']}" if hop == 1 else f"on the path from {src['qualified']}"
+                if tid not in scores:
+                    scores[tid] += sc
+                    reasons[tid].append(why)
+                elif flow_question and scores[tid] < sc:
+                    # a weak lexical hit that sits on the path: for a flow question the path is the evidence
+                    scores[tid] = sc
+                    reasons[tid].insert(0, why)
+                if flow_question:
+                    path_ids.add(tid)
+                targets_all.append(tid)
+        return targets_all
+
     for sid in seeds:
         base = scores[sid]
         for cl in atlas.callers(sid, limit=8):
             if cl["id"] and cl["id"] not in scores:
                 scores[cl["id"]] += base * 0.45
                 reasons[cl["id"]].append(f"calls {atlas.symbol_by_id(sid)['qualified']}")
-        for ce in atlas.callees(sid, limit=12):
-            t = ce.get("target")
-            if t and t.get("id") and t["id"] not in scores:
-                scores[t["id"]] += base * 0.35
-                reasons[t["id"]].append(f"called by {atlas.symbol_by_id(sid)['qualified']}")
+        if flow_question and sid in seeds[:3]:
+            # "how does X reach Y": the path matters as much as the match, so path nodes are scored against the
+            # best match (not the seed) and followed one hop further, through constructors and existing hits
+            first_hop = expand_callees(sid, max(base * 0.35, best_score * 0.3), 1)
+            for nid in first_hop[:8]:
+                expand_callees(nid, best_score * 0.25, 2)
+        else:
+            expand_callees(sid, base * 0.35, 1)
 
     # ---- 3. tests & docs -------------------------------------------------------------
     ranked = sorted(scores, key=lambda s: -scores[s])
@@ -483,6 +552,9 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         per_file: dict[str, int] = defaultdict(int)
         adjusted: dict[int, float] = {}
         for sid in ranked:
+            if sid in path_ids:
+                adjusted[sid] = scores[sid]   # route nodes are not near-duplicates of each other
+                continue
             s = atlas.symbol_by_id(sid)
             path = s["path"] if s else ""
             adjusted[sid] = scores[sid] * (FILE_DIVERSITY ** per_file[path])

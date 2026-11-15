@@ -456,7 +456,10 @@ class Atlas:
                 break
         return out
 
-    def callees(self, sid: int, limit: int = 100) -> list[dict]:
+    def callees(self, sid: int, limit: int = 100, resolve_as: Optional[int] = None) -> list[dict]:
+        """Calls made inside *sid*. ``resolve_as`` resolves them as if made by another symbol: a closure defined
+        inside a method (a decorator factory's `decorator`) is indexed without a parent, so its `self.x()` calls
+        only resolve when the enclosing method stands in."""
         rows = self.conn.execute(
             "SELECT r.name, r.kind, r.qualifier, MIN(r.line) AS line, COUNT(*) AS n FROM refs r WHERE r.enclosing_id=? "
             "AND r.kind IN ('call','new') GROUP BY r.name, r.kind, r.qualifier ORDER BY line LIMIT ?", (sid, limit)).fetchall()
@@ -467,7 +470,7 @@ class Atlas:
         for r in rows:
             target = None
             if fid is not None:
-                rs = res.resolve(r["name"], fid, r["qualifier"], sid, r["kind"])
+                rs = res.resolve(r["name"], fid, r["qualifier"], resolve_as or sid, r["kind"])
                 if rs.targets and rs.confidence in ("high", "medium") and len(rs.targets) == 1:
                     target = self._target_info(rs.targets[0], rs.how)
                 elif rs.targets and rs.confidence in ("high", "medium"):

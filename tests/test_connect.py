@@ -304,3 +304,26 @@ def test_task_context_includes_bodies_only_for_tasks_and_how_questions(atlas: At
     assert any(i["source"] for i in forced["items"])
     how = context.task_context(atlas.ix, atlas, "how does the request get saved to the store")
     assert how["include_source"] is True and any(i["source"] for i in how["items"])
+
+
+def test_flow_questions_follow_closures_and_constructors(tmp_path: Path):
+    """"how does X reach Y": calls made inside a decorator's closure count as the decorator's, constructing a class
+    runs its constructor, and the route's nodes survive the per-file diversity penalty."""
+    (tmp_path / "routing.py").write_text(
+        "class Route:\n    def __init__(self, path, fn):\n        self.app = session(dispatch(fn))\n\n"
+        "def session(app):\n    return app\n\ndef dispatch(fn):\n    return fn\n\n"
+        "class Router:\n    def route(self, path):\n        def decorator(fn):\n            self.add_route(path, fn)\n"
+        "            return fn\n        return decorator\n\n    def add_route(self, path, fn):\n        self.routes.append(Route(path, fn))\n\n"
+        "    def route_alias(self, path):\n        return self.route(path)\n\n    def route_other(self, path):\n        return self.route(path)\n",
+        encoding="utf-8")
+    ix = Index(tmp_path)
+    ix.update()
+    atlas = Atlas(ix)
+    flow = context.task_context(ix, atlas, "how does a route get from Router registration to the handler being dispatched?")
+    names = [i["qualified"] for i in flow["items"]]
+    assert flow["include_source"] is True
+    assert {"Router.add_route", "Route", "session", "dispatch"} <= set(names), names
+    where = context.task_context(ix, atlas, "where is the route registered on the Router")
+    assert where["include_source"] is False
+    assert "session" not in [i["qualified"] for i in where["items"]], "a location question does not follow the route"
+    ix.close()
