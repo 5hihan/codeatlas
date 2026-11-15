@@ -38,7 +38,7 @@ so if then else than too very just also only more most less least code file file
 class classes module modules please pls we our you your they their them there here
 call calls called caller callers test tests tested testing cover covers covered coverage exercise exercises exercised
 break breaks broken breaking give list show explain describe tell name names brief briefly anchor anchors line lines
-repository repo project answer answers changes""".split())
+repository repo project answer answers changes through flow flows""".split())
 # the second block is how questions talk about code ("who calls it, which tests cover it, give file:line anchors"):
 # words about the answer wanted, not about the code, so they never select symbols
 
@@ -52,13 +52,23 @@ DOC_EXT = (".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml", ".env", ".i
 # directory names that say nothing about what the code does
 _PATHWORD_IGNORE = frozenset("src lib app apps pkg pkgs internal main java com org io net js ts py index mod".split())
 # items below this fraction of the best score are a long lexical tail (shown only while the budget is unused)
-TAIL_CUTOFF = 0.2
+TAIL_CUTOFF = 0.3
 MIN_ITEMS = 8
+# the list is what a model reads first and keeps in context for the rest of the session; measured on ten real
+# questions, items beyond these were never the ones it followed up on
+MAX_ITEMS_LOCATION = 12   # signatures-only answers ("where is X")
+MAX_ITEMS_TASK = 18       # answers with bodies
+SIG_CHARS = 150
+DOC_CHARS = 120
+BODY_KINDS = frozenset({"function", "method", "class", "struct", "module"})   # a type's signature already is its body
 # scoring weights (tuned on the benchmark corpora: see the development notes in README)
 COVERAGE_WEIGHT = 0.6     # per task term the symbol's own text covers
 COVERAGE_POWER = 1.5      # covering two task terms is worth more than twice one rare term (MRR 0.70 -> 0.72 on the
                           # nine benchmark tasks; a body-parsing task's request_body_to_args moved from 6th to 3rd)
-EXACT_BOOST = 8.0         # exact-name match, absolute: a boost relative to the best score promoted every `match`/`run`
+EXACT_BOOST = 8.0         # exact-name match on a plain word, absolute: a relative boost promoted every `match`/`run`
+NAMED_SHARE = 0.6         # an identifier the task spells out (Hono.fetch, request_body_to_args, getPath) is the subject:
+                          # its definition gets this share of the best lexical score, and seeds the flow expansion
+_IDENT_IN_TASK = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_#][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]{2,}")
 FTS_LIMIT = 800
 CALLS_TERM_SHARE = 0.15   # per task term a symbol calls (request.body() for "body parsing"), as a share of the best score
 CALLS_TERM_MAX_SITES = 80 # a name called from more places than this (get, run, json) says nothing about the task
@@ -207,6 +217,18 @@ def path_words(path: str) -> list[str]:
 # inside it: Fast, API) would otherwise match everything in the repository
 _PROJECT_REF = re.compile(r"\b(?:in|of|for|on|within|inside)?\s*(?:this|the|our|my)?\s*([A-Za-z][\w.-]*)\s+"
                           r"(?:repository|repo|project|codebase|code base|library|package|monorepo)\b", re.I)
+
+
+def named_identifiers(task: str) -> list[str]:
+    """Identifiers the task spells out as code: qualified (Hono.fetch), snake_case (request_body_to_args) or
+    camelCase (getPath). Plain words are not identifiers, whatever symbol happens to share their name."""
+    task = _PROJECT_REF.sub(" ", task)
+    out: list[str] = []
+    for m in _IDENT_IN_TASK.findall(task):
+        mixed = any(c.isupper() for c in m[1:]) and any(c.islower() for c in m)   # getPath, OpenAPI; not JSX, HTML
+        if ("." in m or "_" in m or mixed) and m not in out and m.lower() not in STOP:
+            out.append(m)   # case kept: the task spelled the identifier, so `OpenAPI` is not `openapi`
+    return out[:8]
 
 
 def terms_from(task: str) -> list[str]:
@@ -394,25 +416,27 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         named = sum(1 for t in term_stems if t in pw)
         if named:
             s *= 1.0 + PATH_TERM_WEIGHT * min(2, named)
-            reasons[sid].append("in the module the task names")
+            reasons[sid].append("named module")
         # coverage: how many distinct task terms the symbol's own text (name/signature/doc) covers
         own = f"{nm} {words} {sig} {doc}".lower()
         covered = _covered(search_terms, own)
         s *= 1.0 + COVERAGE_WEIGHT * covered ** COVERAGE_POWER
         scores[sid] += s
-        reasons[sid].append(f"matches {covered} task term(s)" if covered else "matches path")
+        reasons[sid].append(f"{covered} term{'s' if covered != 1 else ''}" if covered else "path only")
     # symbols selected by structure (the constructor of a named class, a symbol that calls a task term, a callee
     # that names one) are not near-duplicates of their file's lexical hits: the per-file diversity penalty skips them
     structural_ids: set[int] = set()
     # exact-name matches get a strong boost; a bare constructor name ("the Hono constructor") boosts only the
     # constructors of classes the task names, not every constructor in the repository
     exact_boost = EXACT_BOOST
-    for t in exact - set(_CTOR_NAMES):
+    named = named_identifiers(task)
+    named_ids: set[int] = set()
+    for t in exact - set(_CTOR_NAMES) - {n.lower() for n in named if "." not in n}:
         for r in c.execute("SELECT s.id, f.path FROM symbols s JOIN files f ON f.id=s.file_id WHERE lower(s.name)=?" +
                            (" AND (f.path=? OR substr(f.path,1,?)=?)" if scope else "") + " LIMIT 20", (t, *scope_args)):
             scores[r[0]] += exact_boost * _path_factor(r[1])   # a same-named sample in docs_src/ is not the implementation
-            if "exact name match" not in reasons[r[0]]:
-                reasons[r[0]].append("exact name match")
+            if "exact name" not in reasons[r[0]]:
+                reasons[r[0]].append("exact name")
     if exact & set(_CTOR_NAMES):
         for cls in exact - set(_CTOR_NAMES):
             for r in c.execute("SELECT s.id, f.path, p.name FROM symbols s JOIN symbols p ON p.id=s.parent_id "
@@ -508,6 +532,16 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
             if s and s["qualified"] in boost:
                 scores[sid] *= 1.4
                 reasons[sid].append("recently changed (hot)")
+    # an identifier the task spells out is its subject: its definitions get a share of the best score, added after
+    # the rank boost so that among same-named definitions the one matching the task's words stays first
+    best_ranked = max(scores.values(), default=0.0)
+    for ident in named:
+        col = "s.qualified" if "." in ident else "s.name"
+        for r in c.execute(f"SELECT s.id, f.path FROM symbols s JOIN files f ON f.id=s.file_id WHERE {col}=?" +
+                           (" AND (f.path=? OR substr(f.path,1,?)=?)" if scope else "") + " LIMIT 12", (ident, *scope_args)):
+            scores[r[0]] += max(EXACT_BOOST, NAMED_SHARE * best_ranked) * _path_factor(r[1])
+            reasons[r[0]].insert(0, "named in the task")
+            structural_ids.add(r[0]); named_ids.add(r[0])
 
     # ---- 1b. what the agent already knows ---------------------------------------------
     # Candidates close to the known anchors in the connection graph are more likely to be what the task means
@@ -619,10 +653,13 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 reasons[cl["id"]].append(f"calls {atlas.symbol_by_id(sid)['qualified']}")
         if flow_question and sid in seeds[:3]:
             # "how does X reach Y": the path matters as much as the match, so path nodes are scored against the
-            # best match (not the seed) and followed one hop further, through constructors and existing hits
-            first_hop = expand_callees(sid, max(base * 0.35, best_score * 0.3), 1)
+            # best match (not the seed) and followed one hop further, through constructors and existing hits.
+            # From a symbol the task names ("from Hono.fetch ...") the path is the answer: its nodes outrank
+            # lexical hits that merely share the question's words
+            h1, h2 = (0.6, 0.5) if sid in named_ids else (0.3, 0.25)
+            first_hop = expand_callees(sid, max(base * 0.35, best_score * h1), 1)
             for nid in first_hop[:8]:
-                expand_callees(nid, best_score * 0.25, 2)
+                expand_callees(nid, best_score * h2, 2)
         else:
             expand_callees(sid, base * 0.35, 1)
 
@@ -647,6 +684,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     # candidates still within TAIL_CUTOFF of the best score
     best = scores[ranked[0]] if ranked else 0.0
     top = [sid for i, sid in enumerate(ranked[:max_symbols]) if i < MIN_ITEMS or scores[sid] >= best * TAIL_CUTOFF]
+    top = top[:min(max_symbols, MAX_ITEMS_TASK if include_source else MAX_ITEMS_LOCATION)]
     bridge_ids: set[int] = set()
     if anchor_ids:
         # the agent already has these: do not spend the budget repeating them
@@ -682,7 +720,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 tests[path].add(line)
     result["tests"] = [{"path": p, "lines": sorted(ls)[:6], "hits": len(ls)} for p, ls in
                        sorted(tests.items(), key=lambda kv: -len(kv[1]))[:6]]
-    result["docs"] = _docs_mentioning(ix, terms[:8], scope, limit=3)
+    result["docs"] = _docs_mentioning(ix, terms[:8], scope, limit=2)
     # pattern blurbs explain language constructs: kept in the result, rendered only when the task asks about them
     result["explain_patterns"] = bool(hints) or bool(_EXPLAIN_Q.search(task))
     # a change wants to know who calls what it touches; callers of the strongest items save a references() round trip
@@ -699,7 +737,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 seen_edges.add(key)
                 result["relationships"].append(edge)
     plan = plan_context(ix, task=task, scope=scope, requested_budget=token_budget, signals={
-        "candidate_count": len(scores), "exact_match": any("exact name match" in r for r in reasons.values()),
+        "candidate_count": len(scores), "exact_match": any("exact name" in r for r in reasons.values()),
         "fanout": len(set(scores) - lexical_ids), "relationship_count": len(seen_edges),
         "complexity": max((s.get("complexity", 0) or 0 for s in selected.values() if s), default=0),
         "test_count": len(tests), "test_relevance": 1.0 if tests else 0.0, "known_count": len(anchor_labels)})
@@ -718,8 +756,8 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
             continue
         why = ", ".join(reasons[sid][:2])
         header = f"{s['kind']} {s['qualified']}  {s['path']}:{s['start_line']}-{s['end_line']}  [{why}]"
-        sig = (s["signature"] or "")[:200]
-        doc = (s["doc"] or "")[:200]
+        sig = (s["signature"] or "")[:SIG_CHARS]
+        doc = (s["doc"] or "")[:DOC_CHARS]
         cost = estimate_tokens(header + sig + doc) + 4
         if used + cost > allocations["symbols"]:
             result["truncated"] = True
@@ -731,7 +769,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         used += cost
         # source bodies for the strongest items while budget allows (cap 120 lines each); bridges stay signatures
         if (include_source and len(items) < MAX_SOURCE_ITEMS and s["lines"] <= 160 and source_used < allocations["source"]
-                and sid not in bridge_ids):
+                and sid not in bridge_ids and s["kind"] in BODY_KINDS):
             src = atlas.source(s["qualified"], s["path"], max_lines=MAX_SOURCE_LINES)
             if src.get("found"):
                 scost = estimate_tokens(src["text"])
@@ -837,7 +875,7 @@ def _docs_mentioning(ix: Index, terms: list[str], scope: str, limit: int = 6) ->
                 if found:
                     n += 1
                     distinct.update(found)
-                    if len(snippets) < 2:
+                    if len(snippets) < 1:
                         snippets.append(f"{i}: {ln.strip()[:100]}")
             if n and len(distinct) >= need:
                 hits.append((len(distinct), n, os.path.relpath(p, root).replace("\\", "/"), snippets))
