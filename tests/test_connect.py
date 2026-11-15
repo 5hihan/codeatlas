@@ -332,3 +332,12 @@ def test_flow_questions_follow_closures_and_constructors(tmp_path: Path):
     assert where["include_source"] is False
     assert "session" not in [i["qualified"] for i in where["items"]], "a location question does not follow the route"
     ix.close()
+
+
+def test_named_identifier_with_scope(atlas: Atlas):
+    """A task that spells out an identifier, scoped to a directory: the named definition leads and nothing errors
+    (a scope-bound query once reused a binding tuple another block had rebound)."""
+    r = context.task_context(atlas.ix, atlas, "how does Store.save persist records", scope="app", include_source=False)
+    assert r["items"] and r["items"][0]["qualified"] == "Store.save" and "named in the task" in r["items"][0]["why"]
+    r2 = context.task_context(atlas.ix, atlas, "where is handle_request defined", scope="app/", include_source=False)
+    assert r2["items"] is not None

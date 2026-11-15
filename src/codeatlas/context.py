@@ -535,10 +535,11 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     # an identifier the task spells out is its subject: its definitions get a share of the best score, added after
     # the rank boost so that among same-named definitions the one matching the task's words stays first
     best_ranked = max(scores.values(), default=0.0)
+    scope_prefix_args = (scope, len(scope) + 1, scope + "/") if scope else ()   # scope_args was rebound above
     for ident in named:
         col = "s.qualified" if "." in ident else "s.name"
         for r in c.execute(f"SELECT s.id, f.path FROM symbols s JOIN files f ON f.id=s.file_id WHERE {col}=?" +
-                           (" AND (f.path=? OR substr(f.path,1,?)=?)" if scope else "") + " LIMIT 12", (ident, *scope_args)):
+                           (" AND (f.path=? OR substr(f.path,1,?)=?)" if scope else "") + " LIMIT 12", (ident, *scope_prefix_args)):
             scores[r[0]] += max(EXACT_BOOST, NAMED_SHARE * best_ranked) * _path_factor(r[1])
             reasons[r[0]].insert(0, "named in the task")
             structural_ids.add(r[0]); named_ids.add(r[0])
