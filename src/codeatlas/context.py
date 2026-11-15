@@ -87,7 +87,8 @@ MAX_SOURCE_ITEMS = 4      # bodies are included for the strongest items only; th
 MAX_ROUTE_BODIES = 6      # "how does A reach B": the bodies along the route are the answer (measured: each missing one
                           # cost a symbol_source round trip, about 22k tokens of context re-read)
 WINDOW_LINES = 50         # an oversized function selected by its call sites gets a window of source around them
-MAX_SOURCE_LINES = 100    # longer bodies are read on demand with symbol_source
+MAX_SOURCE_LINES = 60     # longer bodies are shown to here and read on demand with symbol_source: measured over
+                          # five-question conversations, every body in a first answer is re-read on each later turn
 
 
 def split_words(s: str) -> list[str]:
@@ -845,9 +846,13 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         if sid in body_ids and source_used < source_cap:
             src = atlas.source(s["qualified"], s["path"], max_lines=MAX_SOURCE_LINES)
             if src.get("found"):
-                scost = estimate_tokens(src["text"])
+                text = src["text"]
+                if s["lines"] > MAX_SOURCE_LINES:
+                    text += (f"\n  ... {s['lines'] - MAX_SOURCE_LINES} more lines to {s['path']}:{s['end_line']}: "
+                             f"symbol_source(\"{s['qualified']}\", path=\"{s['path']}\")")
+                scost = estimate_tokens(text)
                 if source_used + scost <= source_cap:
-                    item["source"] = src["text"]
+                    item["source"] = text
                     source_used += scost
                     included_spans.append((s["path"], s["start_line"], s["end_line"]))
         elif sid in window_ids and source_used < source_cap:

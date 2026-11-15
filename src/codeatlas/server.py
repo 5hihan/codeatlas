@@ -252,8 +252,8 @@ def build_server(app: App):
         anchors, source = app.known_anchors(known)
         r = context.task_context(app.ix, app.atlas, task, scope or None, token_budget or None, include_source,
                                  known=anchors, known_source=source)
-        for it in r["items"][:3]:
-            if it.get("source"):
+        for it in r["items"]:
+            if it.get("source"):   # every body shown is known from here on: a later answer in the session does not repeat it
                 app.working.note_symbol(it)
         return context.render(r)
 
@@ -558,6 +558,23 @@ def build_server(app: App):
         return ("Use CodeAtlas tools before reading files: task_context, file_outline, symbol, impact, triggers, "
                 "references; connections(target, known) for how code you know reaches code you need. "
                 "Fix work: next_snipe -> claim_snipe -> get_snipe_context -> patch -> verify_snipe -> next.")
+
+
+    def _strip_titles(node) -> None:
+        """Pydantic writes a `title` for every parameter ("Token Budget"); they say nothing the name does not and
+        cost about 130 tokens on every request for the always-loaded schemas."""
+        if isinstance(node, dict):
+            node.pop("title", None)
+            for v in node.values():
+                _strip_titles(v)
+        elif isinstance(node, list):
+            for v in node:
+                _strip_titles(v)
+    try:
+        for t in mcp._tool_manager.list_tools():
+            _strip_titles(t.parameters)
+    except Exception:  # an SDK without that attribute keeps its titles
+        pass
 
     return mcp
 
