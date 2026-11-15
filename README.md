@@ -213,13 +213,19 @@ codeatlas hook pretool [--prefix P] [--mode default|search|off]   Claude Code Pr
 
 Claude Code defers MCP tool schemas behind a tool search and shows the model only tool names plus the server's
 instructions at session start. CodeAtlas works with that: the five tools an agent reaches for first
-(`task_context`, `find_symbols`, `symbol`, `file_outline`, `symbol_source`) are flagged `anthropic/alwaysLoad` so the
-first useful call needs no search round-trip, at about 1,100 tokens of schemas upfront (`CODEATLAS_ALWAYS_LOAD`
-overrides the list; the other 34 tools cost only their names, about 640 tokens with the instructions), every
-navigation tool carries `readOnlyHint`/`idempotentHint` so Claude Code runs them in parallel with other read-only
-calls, and the server instructions stay inside the 4,096-character cap. A SessionStart hook adds about 270
-tokens of orientation (index size, which tool to reach for) at startup, resume and `/clear`, and a 125-token reminder
-after every compaction, when models otherwise forget the index exists. A PreToolUse hook auto-approves CodeAtlas's
+(`task_context`, `find_symbols`, `symbol_source`, `references`, `impact`) are flagged `anthropic/alwaysLoad` so the
+first useful call needs no search round-trip (`CODEATLAS_ALWAYS_LOAD` overrides the list; `symbol` and
+`file_outline` were used once each in twenty measured sessions, so their schemas are deferred like the other 32),
+every navigation tool carries `readOnlyHint`/`idempotentHint` so Claude Code runs them in parallel with other
+read-only calls, and the server instructions stay inside the 4,096-character cap. Measured with a one-turn
+`claude -p` with and without `--plugin-dir`, the plugin adds 3,636 prompt tokens to every request: 1,323 for the
+five always-loaded schemas (plain string and integer defaults instead of `Optional` schemas), about 1,360 for the
+39 tool names and the instructions, 644 for the skill, agent and command descriptions, 308 for the SessionStart
+orientation; the previous build added 4,882. The SessionStart hook gives that orientation (index size, which tool
+to reach for, and the rule not to Grep for an identifier or Read a whole indexed file) at startup, resume and
+`/clear`, and a shorter reminder after every compaction, when models otherwise forget the index exists. Dropping
+the rule to save about 110 tokens cost five Grep/Read calls after one `task_context` in a measured session, so it
+stays. A PreToolUse hook auto-approves CodeAtlas's
 own read-only tools, so a query of the index never shows a permission prompt; edits, SNIPE state changes and anything
 that runs tests still ask (`CODEATLAS_AUTO_APPROVE=off` turns the approval off). `codeatlas-plugin/evals/` holds
 `claude plugin eval` cases (a navigation question that must be answered with path:line evidence through CodeAtlas
@@ -244,7 +250,9 @@ the 0.1.2 code run against the same index.
 
 No single measurement got larger. The biggest single savings are hubs: `fastapi/routing.py` outline 6,131 to 2,885,
 `FastAPI` symbol 1,371 to 744, `Context` (hono) 1,252 to 810. Precision moved the other way on the same nine
-tasks: the expected answer is in the top five results for 9/9 (was 7/9), mean reciprocal rank 0.54 to 0.72. Every
+tasks: the expected answer is in the top three results for 8/9 and in the top five for 8/9 (was 7/9), mean
+reciprocal rank 0.54 to 0.72 (the one miss sits sixth: "how are dependencies resolved and injected into endpoints",
+whose answer `solve_dependencies` shares no word with the question). Every
 fold names the call that lists the rest (`full=True`, `file_outline`, `references`), so nothing is hidden, only
 deferred. The hooks cost about 40 ms per tool call (20 ms of it Python start-up) and add nothing to the transcript
 unless they deny or orient. (`task_context` has since been trimmed further to bodies for the strongest four items:
@@ -260,71 +268,89 @@ functions would I change, who calls them, which tests cover them", "how does an 
 HTTP error response" and "where is the request path normalised before routing, and which tests cover that". Each
 question ran with only the built-in tools and with the plugin loaded (`--plugin-dir`); the tables are means of the
 warm-cache passes (the first run of each question is dropped), figures from Claude's own usage report, tool calls
-counted from the stream. Both arms reached the right functions and lines on every question. The plugin arm is the
-0.1.3 build as committed; the baseline was run once and reused, since it does not change.
+counted from the stream. Both arms reached the right functions and lines on every question. The plugin arm is this
+build as committed; the baseline was run once and reused, since it does not change. One caveat on method: the
+retrieval changes in this build were made while looking at `task_context`'s output for these ten questions, so
+they are not a held-out set; the nine-task precision benchmark above uses different questions and moved from a mean
+reciprocal rank of 0.70 to 0.72 under the same changes.
 
 | Mean per question, warm cache | without plugin (30 runs) | with plugin (20 runs) | Welch's t |
 |---|---:|---:|---:|
-| tool calls | 4.3 | 3.0 (-30%) | p = 0.008 |
-| Read calls | 1.4 | 0.2 (-86%) | p < 0.0001 |
+| tool calls | 4.3 | 2.5 (-42%) | p = 0.0001 |
+| Read calls | 1.4 | 0.15 (-90%) | p < 0.0001 |
 | tool errors | 0 | 0 | |
-| API time | 11.6 s | 9.5 s (-18%) | p = 0.07 |
-| output tokens | 1,506 | 1,135 (-25%) | p = 0.016 |
-| new input tokens | 3,034 | 3,032 (0%) | p = 1.0 |
-| input processed (new + cache reads) | 68,741 | 81,778 (+19%) | p = 0.056 |
-| cost | $0.034 | $0.031 (-7%) | p = 0.61 |
+| API time | 11.6 s | 8.7 s (-25%) | p = 0.007 |
+| output tokens | 1,506 | 1,050 (-30%) | p = 0.002 |
+| new input tokens | 3,034 | 3,431 (+13%) | p = 0.47 |
+| input processed (new + cache reads) | 68,741 | 73,865 (+7%) | p = 0.39 |
+| cost | $0.034 | $0.031 (-7%) | p = 0.52 |
 
 The two kinds of question behave differently, so they are worth separating:
 
 | Mean per question, warm cache | narrow six: without (18) | with (12) | task-shaped four: without (12) | with (8) |
 |---|---:|---:|---:|---:|
-| tool calls | 3.8 | 2.1 (-45%, p = 0.001) | 5.1 | 4.4 (-14%, p = 0.29) |
-| Read calls | 1.4 | 0 (p = 0.0005) | 1.5 | 0.5 (-67%, p = 0.016) |
-| API time | 9.8 s | 6.9 s (-30%, p = 0.003) | 14.3 s | 13.5 s (-6%) |
-| output tokens | 1,274 | 820 (-36%, p = 0.002) | 1,854 | 1,609 (-13%, p = 0.18) |
-| new input tokens | 2,086 | 1,365 (-35%, p = 0.31) | 4,457 | 5,533 (+24%, p = 0.16) |
-| input processed | 66,000 | 65,900 (0%) | 72,853 | 105,594 (+45%, p = 0.001) |
-| cost | $0.027 | $0.020 (-27%, p = 0.086) | $0.043 | $0.048 (+12%, p = 0.29) |
+| tool calls | 3.8 | 1.9 (-49%, p = 0.0002) | 5.1 | 3.4 (-34%, p = 0.019) |
+| Read calls | 1.4 | 0.17 (p = 0.003) | 1.5 | 0.13 (-92%, p = 0.0002) |
+| API time | 9.8 s | 6.9 s (-30%, p = 0.005) | 14.3 s | 11.3 s (-21%, p = 0.07) |
+| output tokens | 1,274 | 837 (-34%, p = 0.006) | 1,854 | 1,370 (-26%, p = 0.03) |
+| new input tokens | 2,086 | 2,951 (+41%, p = 0.26) | 4,457 | 4,152 (-7%, p = 0.59) |
+| input processed | 66,000 | 65,788 (0%) | 72,853 | 85,981 (+18%, p = 0.15) |
+| cost | $0.027 | $0.026 (-3%, p = 0.85) | $0.043 | $0.038 (-11%, p = 0.24) |
 
-On the narrow questions the plugin answers in fewer, cheaper steps: `h_compose` ("what breaks if compose changes")
-went from 3.0 calls and $0.030 to one `impact` call and $0.009, the fastapi WebSocket route question from 6.7 calls
-and four Reads to 3.5 calls and none. Two narrow questions cost slightly more with the plugin (the hono match
-question, $0.018 to $0.022, and the hono request-flow question, $0.027 to $0.031): one `task_context` answer with
-route and bodies is larger than the two targeted greps the baseline happened to make. On the task-shaped questions
-the plugin saves few calls and puts more into context, not less: the model asks `task_context` for the change, then
-fetches two or three bodies with `symbol_source`, and each of those requests also carries the plugin's always-on
-prompt cost (3,627 tokens of tool names, instructions, always-loaded schemas and orientation). Cache reads are
-billed at a tenth of new input, which is why cost moved by 12% while input processed moved by 45%, and why neither
-difference is distinguishable from noise at this sample size. The honest reading: fewer tool calls, fewer output
-tokens and no whole-file reads are established across all ten questions; the cost saving is established only in
-direction on the narrow questions and absent on task-shaped ones.
+Per question the plugin cost less on seven of the ten (`h_compose`, "what breaks if compose changes", went from 3.0
+calls and $0.030 to one `impact` call and $0.012; the fastapi dependency-exception question from 6.3 calls and
+$0.048 to 2.0 calls and $0.036; the WebSocket route question from 6.7 calls and four Reads to 2.5 calls and one),
+the same on the body-size task ($0.048 either way, 5.3 against 5.5 calls: `task_context` names
+`request_body_to_args` and the closure that calls `request.body()`, and the model still grepped for the exact read
+sites), and more on two: the hono match question ($0.018 to $0.021) and the hono request-flow question ($0.027 to
+$0.043), where one `task_context` answer with route and bodies is larger than the two targeted greps the baseline
+happened to make. What the arms did: without the plugin, 75 Greps, 43 Reads, 9 shell commands and 2 Globs over 30
+runs; with it, 15 `task_context`, 7 `references`, 5 `symbol_source`, 4 `impact`, 2 `find_symbols`, one index
+`grep`, and 8 Greps, 4 shell commands, 3 Reads and one Glob over 20 runs.
 
-What the arms did: without the plugin, 75 Greps, 43 Reads, 9 shell commands and 2 Globs over 30 runs; with it,
-14 `task_context`, 12 `symbol_source`, 9 `references`, 4 `impact`, 4 `find_symbols`, one `file_outline`, one `symbol`,
-and 5 Greps, 4 Reads and 6 shell commands over 20 runs. None of the 30 plugin-arm runs (cold included) had a tool
-error of any kind or showed a permission prompt. That is the effect of the last two changes: the guard refuses only
-what the index answers better (whole-file Reads of indexed files, identifier greps) and the mod answers those in
-place, so the model sees an outline or a reference list where a refusal used to be. Before the mod, one run in 24
-had a refused shell grep.
+The honest reading: fewer tool calls, fewer output tokens, less API time and almost no whole-file reads are
+established across all ten questions and within each group; the cost difference points the right way (-7% overall,
+-11% on task-shaped questions, where the previous build was +12%) but is within noise at this sample size, because
+cache reads are billed at a tenth of new input and the plugin puts somewhat more into context per request (its
+always-on prompt cost, below, and larger first answers) while it saves output tokens and turns. Spend on every
+real-session measurement in this section: about $14 of API calls.
+
+#### Seamless, measured
+
+| What a user would notice | Measured |
+|---|---|
+| permission prompts for the plugin's tools | none: the read-only tools are auto-approved by a hook (with no permission rule at all, five CodeAtlas calls ran without a prompt while an unlisted Bash call was refused) |
+| tool errors or denials in the transcript | 0 in 30 plugin-arm runs (0 in 30 baseline runs) |
+| a refused Grep or Read | none reaches the model: a forced whole-file `Read src/compose.ts` came back as "src/compose.ts: 73 lines, 2 symbols; the index answered this Read with the file's outline. Top-level declarations: compose f:15-73; dispatch f:32-71. Read one declaration with symbol_source(...)", and the model answered from it |
+| answers that talk about the tooling | 2 of 30 say "using the CodeAtlas index" as their source; none mention a hook, a refusal or a denied call |
+| session start | +1.2 to +1.7 s on a one-turn `claude -p` session (MCP server start, index freshness check, SessionStart hook), 2.2-5.5 s without the plugin against 3.8-6.8 s with it, four pairs |
+| per tool call | about 40 ms of PreToolUse hook (20 ms of it Python start-up) |
+| files outside the index | docs, config and unindexed files are never gated |
 
 What moved these numbers during 0.1.3: `task_context` includes bodies only for tasks and "how does it work"
 questions (a "where is X" answer dropped from about 3,000 to 1,300-2,200 tokens); for "how does X reach Y"
 questions it follows the route (calls made inside closures count as the enclosing method's, constructing a class
 runs its constructor, route nodes are kept even when they are weak lexical matches); the orientation routes "who
-calls / what breaks" to `references` and `impact`, which are always-loaded; and a denied identifier grep carries the
-callers in its reason. Before those changes the first three questions cost 13% more with the plugin than without
-and used 56% more new input tokens. The always-load decision is measured, not assumed: with
-`CODEATLAS_ALWAYS_LOAD=none` the same questions took 6-7 calls instead of 2-4 (two `ToolSearch` round trips, then a
-fallback to Grep/Read) and cost 50-100% more. Auto-approve is measured too: with no permission rule for the server
-at all, five CodeAtlas calls ran without a prompt while an unlisted Bash call was refused. 23 instead of 39 tools
-would save only about 390 of the 3,627 always-on tokens, which confirms the other schemas are deferred.
+calls / what breaks" to `references` and `impact`, which are always-loaded; a denied identifier grep carries the
+callers in its reason, and the mod answers whole-file Reads and identifier greps in place. For task-shaped
+questions: words that describe the answer wanted ("who calls them, which tests cover them, give file:line anchors")
+and the project's own name ("in this FastAPI repository") no longer select symbols; `scripts/` and `tools/` rank
+like examples; a bare "constructor" boosts only the constructors of classes the task names; items of a change task
+carry their callers (`callers: solve_dependencies fastapi/dependencies/utils.py:800`); a symbol that calls a task
+term counts ("body parsing" happens where `request.body()` is called); TypeScript private members (`#addRoute`) are
+indexed as identifiers, so their six call sites are references where there were none (one measured answer had
+said "CodeAtlas reports no internal callers for #addRoute"). Before those changes the task-shaped four cost 12% more
+with the plugin than without and processed 45% more input; the first three narrow questions had cost 13% more and
+used 56% more new input tokens. The always-load decision is measured, not assumed: with `CODEATLAS_ALWAYS_LOAD=none`
+the same questions took 6-7 calls instead of 2-4 (two `ToolSearch` round trips, then a fallback to Grep/Read) and
+cost 50-100% more. Auto-approve is measured too: with no permission rule for the server at all, five CodeAtlas calls
+ran without a prompt while an unlisted Bash call was refused.
 
 `claude plugin eval codeatlas-plugin --scaffold --mocks off --allow-tools "mcp__plugin_codeatlas_atlas__*"` runs the
 two bundled cases with and without the plugin. At the default three runs per case every run passed in both arms:
 the navigation question is answered with path:line evidence either way (through CodeAtlas tools and no whole-file
 read with the plugin, through Grep and two Reads without it), and the non-code question calls no CodeAtlas tool in
-any run, so the plugin does not trigger on general questions. About $10 of API calls paid for every real-session
-measurement in this section ($7.82 for the A/B runs, $0.88 for the evals, the rest for probes).
+any run, so the plugin does not trigger on general questions.
 
 ## The guard: advice becomes a rule
 
