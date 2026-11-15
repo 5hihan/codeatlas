@@ -1,7 +1,7 @@
 ---
 name: codeatlas
-description: Navigate, understand and fix code in repositories indexed by CodeAtlas (tree-sitter code map, config/schema relationships, SNIPE fix loop). Use whenever the user asks where something is implemented, what calls what, how one piece of code reaches another, what a change affects, which config/env/schema a symbol uses, or to fix a failing test or bug, instead of reading whole files or grepping.
-when_to_use: where is X, what calls Y, how does A reach B, what breaks if Z changes, which env var / table / config does this use, explain how this feature flows, fix this failing test, find the bug
+description: Navigate, understand and fix code in a repository indexed by CodeAtlas (tree-sitter code map, config/schema relationships, SNIPE fix loop) instead of reading whole files or grepping: where something is implemented, what calls what, how one piece of code reaches another, what a change affects, which config/env/schema a symbol uses, fixing a failing test or bug.
+when_to_use: where is X, what calls Y, how does A reach B, what breaks if Z changes, which env var / table / config does this use, fix this failing test, find the bug
 allowed-tools: mcp__plugin_codeatlas_atlas__*
 ---
 

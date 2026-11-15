@@ -38,7 +38,7 @@ def test_session_start_orients_when_indexed(repo: Path, capsys, monkeypatch):
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert "1 files, 3 symbols" in ctx and "task_context" in ctx and "mcp__plugin_codeatlas_atlas__*" in ctx
-    assert "connections(target, known)" in ctx and "replace_symbol" in ctx
+    assert "symbol_source" in ctx and "references" in ctx and "replace_symbol" in ctx
     assert len(ctx) < 1800, "orientation must stay a few hundred tokens: it is read on every session"
     # a sub-directory of the repo finds the same index
     sub = _run_hook(["session-start"], {"cwd": str(repo / "app"), "source": "resume"}, capsys, monkeypatch)
@@ -153,7 +153,8 @@ def test_tool_annotations_and_always_load(repo: Path):
     async def go():
         tools = {t.name: t for t in await mcp.list_tools()}
         always = {n for n, t in tools.items() if (t.meta or {}).get("anthropic/alwaysLoad")}
-        assert always == set(ALWAYS_LOAD) and {"task_context", "file_outline", "symbol_source", "find_symbols", "references", "impact"} <= always
+        assert always == set(ALWAYS_LOAD) and {"task_context", "symbol_source", "find_symbols", "references", "impact"} <= always
+        assert "symbol" not in always and "file_outline" not in always, "used once each in twenty sessions: deferred"
         assert 3 <= len(always) <= 8, "a handful of upfront tools: the other 32 stay deferred"
         upfront = sum(len(json.dumps({"n": t.name, "d": t.description, "s": t.input_schema})) for n, t in tools.items() if n in always)
         assert upfront / 3.6 < 1800, f"always-on schema cost must stay well under two thousand tokens, got ~{upfront / 3.6:.0f}"

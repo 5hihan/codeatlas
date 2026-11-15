@@ -13,7 +13,7 @@ IDENT_TYPES = frozenset({
     "identifier", "field_identifier", "property_identifier", "type_identifier",
     "simple_identifier", "name", "constant", "namespace_identifier",
     "shorthand_property_identifier", "statement_identifier", "word",
-    "variable_name",
+    "variable_name", "private_property_identifier",
 })
 
 COMMENT_TYPES = frozenset({"comment", "line_comment", "block_comment", "doc_comment"})

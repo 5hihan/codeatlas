@@ -139,7 +139,7 @@ def test_python_and_mcp_defaults_select_auto_budget(indexed):
             tool = next(t for t in definitions if t.name == name)
             schema = tool.input_schema
             assert "token_budget" not in schema.get("required", [])
-            assert schema["properties"]["token_budget"].get("default") is None
+            assert schema["properties"]["token_budget"].get("default") in (None, 0)  # 0 and None both select the automatic budget
     finally:
         app.close()
 

@@ -46,6 +46,14 @@ def is_example_path(path: str) -> bool:
     return bool(EXAMPLE_HINT.search(path))
 
 
+SCRIPT_HINT = re.compile(r"(^|/)(scripts?|tools?|tooling|ci|hack|devtools|dev-tools|infra|deploy|release)(/|$)", re.I)
+
+
+def is_script_path(path: str) -> bool:
+    """Build, release and maintenance tooling (scripts/, tools/, ci/): real code, rarely the subject of a task."""
+    return bool(SCRIPT_HINT.search(path))
+
+
 class Atlas:
     """High level read API over an :class:`Index`."""
 

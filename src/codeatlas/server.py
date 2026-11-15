@@ -22,22 +22,15 @@ from .watcher import Watcher
 
 log = logging.getLogger("codeatlas")
 
-INSTRUCTIONS = """Use these tools instead of Grep, Glob, Read and Edit on this repository's indexed source files: CodeAtlas
-holds a tree-sitter map of it (symbols, references, call graph, imports, env keys, SQL tables) and answers in
-compact text with path:line anchors. Entry points: task_context("<what you are doing>", scope="dir/") to start a
-task (relevant symbols with source, callers, tests, config, and the routes from what you already looked at);
-find_symbols / file_outline to locate; symbol (callers, callees) and symbol_source (just the lines you need) to
-read; connections(target, known) for how code you know reaches code you need; references / impact / triggers
-before changing anything; replace_symbol / insert_code to edit (parse-checked, re-indexed at once).
-task_context remembers what you looked at in this session (symbol, symbol_source, file_outline, references, edits)
-and ranks results by how they connect to it; pass known=[...] to name what you understand, known=[] to start fresh.
-change_context(base_ref) summarises what you changed and which consumers/tests to re-check. relationships(path)
-traces code/config/schema dependencies. programming_patterns(path) explains detected language constructs.
-task_context, repo_map and change_context adapt their budget to scope and evidence; set token_budget to override.
-Big files come back summarised from file_outline (full=True lists everything). The index updates itself on every
-file change. Fix work runs the SNIPE loop (Scan, Narrow, Infer, Patch, Evaluate): next_snipe -> claim_snipe ->
-get_snipe_context (level 1, climb only if needed) -> patch the smallest surface -> verify_snipe -> next_snipe.
-Feed failures with snipe_report; snipe_scan finds concrete problems; opportunities stay dormant. Never widen a
+INSTRUCTIONS = """CodeAtlas holds a tree-sitter map of this repository (symbols, references, call graph, imports, env keys, SQL
+tables); use its tools instead of Grep, Glob, Read and Edit on indexed source files. Answers are compact text with
+path:line anchors. Start a task with task_context("<what you are doing>", scope="dir/"): relevant symbols with
+source, callers, tests and config, ranked by how they connect to what you already looked at (known=[...] names
+it, known=[] starts fresh). Locate with find_symbols / file_outline, read with symbol / symbol_source, check
+references / impact / triggers before changing anything, connections(target, known) for how code you know reaches
+code you need, replace_symbol / insert_code to edit in place (parse-checked, re-indexed at once);
+change_context(base_ref) reviews what you changed. Fix work runs the SNIPE loop: next_snipe -> claim_snipe ->
+get_snipe_context -> patch the smallest surface -> verify_snipe; snipe_report feeds failures in; never widen a
 snipe into a refactor."""
 
 
@@ -45,9 +38,10 @@ snipe into a refactor."""
 # the ones an agent reaches for first, so the first useful call needs no search round-trip. Measured in real
 # sessions: with none always-loaded the same questions took 6-7 calls instead of 2-4 (two ToolSearch round trips
 # and a fallback to Grep/Read) and cost 50-100% more; `references` and `impact` are where "who calls / what breaks"
-# questions go, so a search before them was the remaining waste.
+# questions go, so a search before them was the remaining waste. `symbol` and `file_outline` were used once each
+# in twenty measured sessions, so their schemas (about 400 tokens on every request) are deferred.
 ALWAYS_LOAD = frozenset(os.environ.get("CODEATLAS_ALWAYS_LOAD",
-                                       "task_context,find_symbols,symbol,file_outline,symbol_source,references,impact").split(","))
+                                       "task_context,find_symbols,symbol_source,references,impact").split(","))
 
 
 class App:
@@ -240,18 +234,17 @@ def build_server(app: App):
                              exported_only=exported_only)
 
     @tool
-    def task_context(task: str, scope: Optional[str] = None, token_budget: Optional[int] = None,
-                     include_source: Optional[bool] = None, max_symbols: int = 40, known: Optional[list[str]] = None) -> str:
-        """Start here for any task: the symbols relevant to the task text (stemmed search over names, signatures,
-        docs and module names, boosted by PageRank and graph proximity), source for the strongest ones, tests and
-        config/docs mentioning the terms, in one adaptive-budget answer with path:line anchors. scope limits to a
-        path prefix. known = symbols, files or path:line you already understand (defaults to what you looked at
-        this session; known=[] starts fresh): results are ranked by how they connect to it and the route to each is
-        shown (main --calls@4--> handle --calls@5--> process). Each item says why it is there. include_source defaults
-        to bodies for tasks and "how does it work" questions, signatures only for "where is / who calls / what
-        breaks" questions (symbol_source fetches any body)."""
+    def task_context(task: str, scope: str = "", token_budget: int = 0, include_source: Optional[bool] = None,
+                     known: Optional[list[str]] = None) -> str:
+        """Start here for any task: the symbols relevant to the task text (search over names, signatures, docs and
+        module names, boosted by PageRank and graph proximity) with source for the strongest, their callers when
+        the task is a change, tests and config, in one budgeted answer with path:line anchors. scope = path
+        prefix. known = symbols/files/path:line you already understand (default: what you looked at this session;
+        [] = fresh): results are ranked by how they connect to it and the route to each is shown. Bodies are
+        included for tasks and "how does it work" questions, signatures only for "where is / who calls"
+        questions."""
         anchors, source = app.known_anchors(known)
-        r = context.task_context(app.ix, app.atlas, task, scope, token_budget, include_source, max_symbols,
+        r = context.task_context(app.ix, app.atlas, task, scope or None, token_budget or None, include_source,
                                  known=anchors, known_source=source)
         for it in r["items"][:3]:
             if it.get("source"):
@@ -318,10 +311,10 @@ def build_server(app: App):
         return fmt.outline(o, show_imports, compact=not full)
 
     @tool
-    def find_symbols(query: str, kind: Optional[str] = None, path: Optional[str] = None, limit: int = 25) -> str:
-        """Find definitions by name (exact, prefix, substring, then fuzzy CamelCase words). kind filters by
-        function|method|class|interface|type|enum|struct|module. path filters by path substring."""
-        return fmt.symbol_list(app.atlas.find_symbols(query, kind, path, limit))
+    def find_symbols(query: str, kind: str = "", path: str = "", limit: int = 25) -> str:
+        """Find definitions by name (exact, prefix, substring, fuzzy CamelCase). kind: function|method|class|
+        interface|type|enum|struct|module; path: substring filter."""
+        return fmt.symbol_list(app.atlas.find_symbols(query, kind or None, path or None, limit))
 
     @tool
     def symbol(name: str, path: Optional[str] = None, full: bool = False) -> str:
@@ -335,30 +328,28 @@ def build_server(app: App):
         return fmt.symbol_detail(d, compact=not full)
 
     @tool
-    def symbol_source(target: str, path: Optional[str] = None, context: int = 0, max_lines: int = 400) -> str:
+    def symbol_source(target: str, path: str = "", context: int = 0, max_lines: int = 400) -> str:
         """Source text of one symbol (or path:start-end range) with line numbers. Cheaper than reading the file."""
-        r = app.atlas.source(target, path, context, max_lines)
+        r = app.atlas.source(target, path or None, context, max_lines)
         if r.get("found"):
             app.remember(r["path"], r["start"] + context)
         return fmt.source(r)
 
     @tool
-    def references(name: str, kind: Optional[str] = None, limit: int = 100, exclude_tests: bool = False,
-                   path: Optional[str] = None, offset: int = 0) -> str:
-        """Every place a name is used, grouped by file with line numbers and enclosing symbol. When path (or a
-        qualified name) pins one definition, only references resolving to it are listed. Reports the true total,
-        how many are shown, and a next offset for continuation. kind: call | new | arg | ref | import."""
-        r = app.atlas.references(name, kind, limit, exclude_tests, path, offset)
+    def references(name: str, path: str = "", kind: str = "", limit: int = 100, offset: int = 0) -> str:
+        """Every use of a name, grouped by file with line and enclosing symbol; path (or a qualified name) pins
+        one definition. Reports the true total and a next offset. kind: call | new | arg | ref | import."""
+        r = app.atlas.references(name, kind or None, limit, False, path or None, offset)
         if r.get("resolved_to") and r["definitions"]:
             d = r["definitions"][0]
             app.working.note_symbol({"path": d["path"], "start_line": d["line"], "qualified": d["qualified"]})
         return fmt.references(r)
 
     @tool
-    def impact(name: str, path: Optional[str] = None, depth: int = 3, full: bool = False) -> str:
-        """Blast radius: transitive callers of a symbol up to depth hops, affected files and tests. Run before
-        changing a signature or behaviour. Crowded depth levels are grouped by file; full=True lists every symbol."""
-        d = app.atlas.impact(name, path, depth)
+    def impact(name: str, path: str = "", depth: int = 3, full: bool = False) -> str:
+        """Blast radius: transitive callers up to depth hops, affected files and tests. Run before changing a
+        signature or behaviour. Crowded levels are grouped by file; full=True lists every symbol."""
+        d = app.atlas.impact(name, path or None, depth)
         if d.get("found"):
             app.working.note_symbol(d["root"])
         return fmt.impact(d, compact=not full)

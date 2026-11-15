@@ -23,7 +23,7 @@ import time
 from collections import defaultdict
 from typing import Iterable, Optional
 
-from .graph import Atlas, is_example_path, is_test_path
+from .graph import Atlas, is_example_path, is_script_path, is_test_path
 from .languages import CLASS_KINDS
 from .indexer import Index
 from .rank import ensure_rank, estimate_tokens
@@ -35,13 +35,18 @@ error errors add adding added remove removing removed update updating updated ch
 made implement implementing support supporting handle handling when where which what who how why should would could
 can cannot not no yes do does did done doing use using used need needs needed want wants wanted new old all any some
 so if then else than too very just also only more most less least code file files function functions method methods
-class classes module modules please pls we our you your they their them there here""".split())
+class classes module modules please pls we our you your they their them there here
+call calls called caller callers test tests tested testing cover covers covered coverage exercise exercises exercised
+break breaks broken breaking give list show explain describe tell name names brief briefly anchor anchors line lines
+repository repo project answer answers changes""".split())
+# the second block is how questions talk about code ("who calls it, which tests cover it, give file:line anchors"):
+# words about the answer wanted, not about the code, so they never select symbols
 
 FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(symbol_id UNINDEXED, name, words, signature, doc, path,
   pathwords, tokenize='unicode61');
 """
-FTS_SCHEMA_VERSION = "2"   # bump when the indexed text changes shape (stems, directory words)
+FTS_SCHEMA_VERSION = "3"   # bump when the indexed text changes shape (stems, directory words, stop words)
 
 DOC_EXT = (".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml", ".env", ".ini", ".cfg", ".sql", ".graphql", ".proto")
 # directory names that say nothing about what the code does
@@ -51,9 +56,16 @@ TAIL_CUTOFF = 0.2
 MIN_ITEMS = 8
 # scoring weights (tuned on the benchmark corpora: see the development notes in README)
 COVERAGE_WEIGHT = 0.6     # per task term the symbol's own text covers
+COVERAGE_POWER = 1.5      # covering two task terms is worth more than twice one rare term (MRR 0.70 -> 0.72 on the
+                          # nine benchmark tasks; a body-parsing task's request_body_to_args moved from 6th to 3rd)
+EXACT_BOOST = 8.0         # exact-name match, absolute: a boost relative to the best score promoted every `match`/`run`
+FTS_LIMIT = 800
 RANK_WEIGHT = 2.0         # PageRank boost: 1 + RANK_WEIGHT * sqrt(rank / max_rank)
 TEST_FACTOR = 0.4
 EXAMPLE_FACTOR = 0.5
+SCRIPT_FACTOR = 0.5       # scripts/, tools/, ci/: build and release tooling, rarely the subject of a task
+MAX_CALLER_ITEMS = 6      # for a change ("which functions would I change, who calls them"): callers of the strongest items
+MAX_CALLERS_SHOWN = 5
 # "how does X work" is usually answered by callable code; types, constants and properties are reached from it
 KIND_FACTORS = {"interface": 0.75, "type": 0.75, "enum": 0.8, "constant": 0.7, "variable": 0.7, "property": 0.7}
 PRIVATE_FACTOR = 0.8      # private helpers are reached through their public callers
@@ -189,7 +201,14 @@ def path_words(path: str) -> list[str]:
     return stems_of(words)
 
 
+# "in this FastAPI repository", "the hono codebase": the project is named, not a symbol; its name (and the words
+# inside it: Fast, API) would otherwise match everything in the repository
+_PROJECT_REF = re.compile(r"\b(?:in|of|for|on|within|inside)?\s*(?:this|the|our|my)?\s*([A-Za-z][\w.-]*)\s+"
+                          r"(?:repository|repo|project|codebase|code base|library|package|monorepo)\b", re.I)
+
+
 def terms_from(task: str) -> list[str]:
+    task = _PROJECT_REF.sub(" ", task)
     seen: list[str] = []
     for w in split_words(task):
         if len(w) >= 3 and w not in STOP and w not in seen:
@@ -259,6 +278,17 @@ def _fts_query(terms: list[str]) -> str:
     return " OR ".join(parts)
 
 
+def _path_factor(path: str) -> float:
+    """Tests, documentation samples and tooling are real code but rarely what a task is about."""
+    if is_test_path(path):
+        return TEST_FACTOR
+    if is_example_path(path):
+        return EXAMPLE_FACTOR
+    if is_script_path(path):
+        return SCRIPT_FACTOR
+    return 1.0
+
+
 def _covered(terms: list[str], own: str) -> int:
     """How many task terms the symbol's own text covers, comparing stems (``resolved`` covers ``resolve``)."""
     own_stems = set(stems_of(split_words(own)))
@@ -303,6 +333,9 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     if include_source is None:
         include_source = wants_source(task)
     terms = terms_from(task)
+    # "the Hono constructor": the constructor name selects nothing by itself (every class has one); it is resolved
+    # through the class the task names, below
+    search_terms = [t for t in terms if t not in _CTOR_NAMES]
     scope = ix.rel(scope).rstrip("/") if scope and scope.strip() != "." else ""
     if isinstance(known, str):
         known = [known]
@@ -326,15 +359,15 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         scope_sql = " AND (path=? OR substr(path,1,?)=?)" if scope else ""
         scope_args = (scope, len(scope) + 1, scope + "/") if scope else ()
         rows = c.execute("SELECT symbol_id, bm25(symbols_fts, 0.0, 4.0, 2.5, 1.2, 1.2, 0.0, 0.4) AS s, path, "
-                         "name, words, signature, doc FROM symbols_fts WHERE symbols_fts MATCH ?" + scope_sql + " ORDER BY s LIMIT 400",
-                         (_fts_query(terms), *scope_args)).fetchall()
+                         "name, words, signature, doc FROM symbols_fts WHERE symbols_fts MATCH ?" + scope_sql + f" ORDER BY s LIMIT {FTS_LIMIT}",
+                         (_fts_query(search_terms), *scope_args)).fetchall()
     except Exception as e:  # malformed query
         rows = []
         result["notes"].append(f"text search failed: {e}")
     rank_rows = {r[0]: r[1] for r in c.execute("SELECT symbol_id, rank FROM symbol_rank")}
     max_rank = max(rank_rows.values(), default=1.0) or 1.0
     exact = {t for t in terms}
-    term_stems = {stem(t) for t in terms if len(stem(t)) >= 3}
+    term_stems = {stem(t) for t in search_terms if len(stem(t)) >= 3}
     meta: dict[int, tuple[str, int]] = {}
     ids = [r[0] for r in rows]
     for i in range(0, len(ids), 400):
@@ -347,30 +380,42 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
             s *= TEST_FACTOR
         elif is_example_path(path):
             s *= EXAMPLE_FACTOR  # docs samples / benchmarks / fixtures: real code, rarely the subject of a task
+        elif is_script_path(path):
+            s *= SCRIPT_FACTOR
         kind, exported = meta.get(sid, ("", 1))
         s *= KIND_FACTORS.get(kind, 1.0)
         if not exported:
             s *= PRIVATE_FACTOR
         # the task names the module itself ("dependencies" -> fastapi/dependencies/, "jsx renderer" -> jsx-renderer/);
         # examples and tests are organised by topic too, but they are not where the behaviour lives
-        pw = set(path_words(path)) if not (is_test_path(path) or is_example_path(path)) else set()
+        pw = set(path_words(path)) if not (is_test_path(path) or is_example_path(path) or is_script_path(path)) else set()
         named = sum(1 for t in term_stems if t in pw)
         if named:
             s *= 1.0 + PATH_TERM_WEIGHT * min(2, named)
             reasons[sid].append("in the module the task names")
         # coverage: how many distinct task terms the symbol's own text (name/signature/doc) covers
         own = f"{nm} {words} {sig} {doc}".lower()
-        covered = _covered(terms, own)
-        s *= 1.0 + COVERAGE_WEIGHT * covered
+        covered = _covered(search_terms, own)
+        s *= 1.0 + COVERAGE_WEIGHT * covered ** COVERAGE_POWER
         scores[sid] += s
         reasons[sid].append(f"matches {covered} task term(s)" if covered else "matches path")
-    # exact-name matches get a strong boost
-    for t in exact:
+    # exact-name matches get a strong boost; a bare constructor name ("the Hono constructor") boosts only the
+    # constructors of classes the task names, not every constructor in the repository
+    exact_boost = EXACT_BOOST
+    for t in exact - set(_CTOR_NAMES):
         for r in c.execute("SELECT s.id, f.path FROM symbols s JOIN files f ON f.id=s.file_id WHERE lower(s.name)=?" +
                            (" AND (f.path=? OR substr(f.path,1,?)=?)" if scope else "") + " LIMIT 20", (t, *scope_args)):
-            scores[r[0]] += 8.0
+            scores[r[0]] += exact_boost * _path_factor(r[1])   # a same-named sample in docs_src/ is not the implementation
             if "exact name match" not in reasons[r[0]]:
                 reasons[r[0]].append("exact name match")
+    if exact & set(_CTOR_NAMES):
+        for cls in exact - set(_CTOR_NAMES):
+            for r in c.execute("SELECT s.id, f.path, p.name FROM symbols s JOIN symbols p ON p.id=s.parent_id "
+                               "JOIN files f ON f.id=s.file_id WHERE lower(p.name)=? AND s.name IN (%s)" % ",".join("?" * len(_CTOR_NAMES)) +
+                               (" AND (f.path=? OR substr(f.path,1,?)=?)" if scope else "") + " LIMIT 20",
+                               (cls, *_CTOR_NAMES, *scope_args)):
+                scores[r[0]] += exact_boost * _path_factor(r[1])
+                reasons[r[0]].append(f"constructor of {r[2]}")
     # A task may name a schema/config rather than a symbol. Resolve explicit consumers
     # from the persisted relationship index instead of guessing from matching names.
     from .relationships import relationships
@@ -519,6 +564,11 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                     continue
                 why = f"called by {src['qualified']}" if hop == 1 else f"on the path from {src['qualified']}"
                 if tid not in scores:
+                    # a callee whose own name covers task terms (constructor -> #addRoute for "how routes are
+                    # registered") is the behaviour the task is about, not just a neighbour
+                    ts = atlas.symbol_by_id(tid)
+                    if ts and _covered(search_terms, f"{ts['name']} {ts.get('signature') or ''}".lower()):
+                        sc = max(sc * (1.0 + COVERAGE_WEIGHT), best_score * 0.3)
                     scores[tid] += sc
                     reasons[tid].append(why)
                 elif flow_question and scores[tid] < sc:
@@ -602,6 +652,11 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     result["tests"] = [{"path": p, "lines": sorted(ls)[:6], "hits": len(ls)} for p, ls in
                        sorted(tests.items(), key=lambda kv: -len(kv[1]))[:6]]
     result["docs"] = _docs_mentioning(ix, terms[:8], scope, limit=3)
+    # pattern blurbs explain language constructs: kept in the result, rendered only when the task asks about them
+    result["explain_patterns"] = bool(hints) or bool(_EXPLAIN_Q.search(task))
+    # a change wants to know who calls what it touches; callers of the strongest items save a references() round trip
+    show_callers = bool(_CALLERS_Q.search(task))
+    caller_items = 0
 
     # Reserve dependency evidence and tests before adding optional source bodies.
     selected = {sid: atlas.symbol_by_id(sid) for sid in top}
@@ -654,8 +709,17 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                     source_used += scost
                     included_spans.append((s["path"], s["start_line"], s["end_line"]))
         items.append(item)
-        item["patterns"] = atlas.programming_patterns(s["path"], limit=4,
-            start_line=s["start_line"], end_line=s["end_line"])["items"]
+        item["patterns"] = atlas.programming_patterns(s["path"], limit=4, start_line=s["start_line"],
+                                                      end_line=s["end_line"])["items"]
+        if (show_callers and caller_items < MAX_CALLER_ITEMS and sid not in bridge_ids
+                and s["kind"] in ("function", "method", "class") and not is_test_path(s["path"])):
+            line = _callers_line(atlas, sid, s)
+            if line:
+                ccost = estimate_tokens(line) + 1
+                if used + ccost <= allocations["symbols"]:
+                    item["callers"] = line
+                    used += ccost
+                    caller_items += 1
     result["items"] = items
     result["tokens_used"] = used + source_used
     result["symbols_considered"] = len(scores)
@@ -663,13 +727,51 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     return result
 
 
+_EXPLAIN_Q = re.compile(r"\b(explain|idiom|idioms|pattern|patterns|construct|constructs|concept|concepts|what is|teach|learn)\b", re.I)
+_CALLERS_Q = re.compile(r"\b(who calls|what calls|callers?|call sites?|who uses|what uses|used by|what breaks|would break|"
+                        r"depends? on|change|changes|changing|changed|modify|modifying|refactor|rename|remove|replace|"
+                        r"signature|impact|affect|affects|affected)\b", re.I)
+
+
+def _callers_line(atlas: Atlas, sid: int, s: dict) -> str:
+    """``callers: A path:line, B path:line (+n more: references("name"); k in tests)`` for one item."""
+    rows = atlas.callers(sid, limit=60)
+    code = [r for r in rows if not is_test_path(r["path"])]
+    in_tests = len(rows) - len(code)
+    if not rows:
+        return ""
+    code.sort(key=lambda r: is_example_path(r["path"]))   # real callers before documentation samples
+    shown = []
+    last_path = None
+    for r in code[:MAX_CALLERS_SHOWN]:
+        loc = f"{r['path']}:{r['line']}" if r["path"] != last_path else f":{r['line']}"
+        shown.append(f"{r['qualified']} {loc}")
+        last_path = r["path"]
+    tail = []
+    if len(code) > MAX_CALLERS_SHOWN:
+        tail.append(f"+{len(code) - MAX_CALLERS_SHOWN} more: references(\"{s['name']}\")")
+    if in_tests:
+        tail.append(f"{in_tests} in tests")
+    text = "callers: " + (", ".join(shown) if shown else "only tests")
+    return text + (f" ({'; '.join(tail)})" if tail else "")
+
+
+_HISTORY_DOCS = frozenset({"changelog", "changes", "history", "migration", "migrating", "upgrading", "license", "licence",
+                           "contributing", "code_of_conduct", "authors", "notice", "release_notes", "releases"})
+
+
 def _docs_mentioning(ix: Index, terms: list[str], scope: str, limit: int = 6) -> list[dict]:
-    """Config/doc files (not in the code index) whose text mentions the task terms."""
+    """Config/doc files (not in the code index) whose text mentions the task terms, ranked by how many distinct
+    terms they mention. The repository's own name matches everything and counts for nothing; change logs,
+    migration guides and policy files are never what a task is about."""
+    repo_name = ix.repo.name.lower()
+    terms = [t for t in terms if t != repo_name and len(t) >= 3]
     if not terms:
         return []
+    need = min(2, len(terms))
     from .indexer import DEFAULT_IGNORE_DIRS
-    rx = re.compile("|".join(re.escape(t) for t in terms), re.I)
-    hits: list[tuple[int, str, list[str]]] = []
+    rx = re.compile("|".join(f"({re.escape(t)})" for t in terms), re.I)
+    hits: list[tuple[int, int, str, list[str]]] = []
     root = ix.repo
     walked = 0
     for dirpath, dirnames, filenames in os.walk(root):
@@ -682,6 +784,8 @@ def _docs_mentioning(ix: Index, terms: list[str], scope: str, limit: int = 6) ->
             if fn == ".env" or fn.startswith(".env."):
                 continue  # env definitions are retrieved as keys via relationships, never as value snippets
             if not fn.lower().endswith(DOC_EXT) or fn in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock"):
+                continue
+            if re.sub(r"[-.].*$", "", fn.lower()).replace("-", "_") in _HISTORY_DOCS:
                 continue
             p = os.path.join(dirpath, fn)
             walked += 1
@@ -696,15 +800,18 @@ def _docs_mentioning(ix: Index, terms: list[str], scope: str, limit: int = 6) ->
                 continue
             snippets = []
             n = 0
+            distinct: set[int] = set()
             for i, ln in enumerate(lines, 1):
-                if rx.search(ln):
+                found = [m.lastindex for m in rx.finditer(ln)]
+                if found:
                     n += 1
+                    distinct.update(found)
                     if len(snippets) < 2:
                         snippets.append(f"{i}: {ln.strip()[:100]}")
-            if n:
-                hits.append((n, os.path.relpath(p, root).replace("\\", "/"), snippets))
-    hits.sort(key=lambda h: -h[0])
-    return [{"path": p, "hits": n, "snippets": s} for n, p, s in hits[:limit]]
+            if n and len(distinct) >= need:
+                hits.append((len(distinct), n, os.path.relpath(p, root).replace("\\", "/"), snippets))
+    hits.sort(key=lambda h: (-h[0], -h[1]))
+    return [{"path": p, "hits": n, "terms": d, "snippets": s} for d, n, p, s in hits[:limit]]
 
 
 def render(r: dict) -> str:
@@ -755,6 +862,8 @@ def render(r: dict) -> str:
                 block += f"\n  {it['signature']}"
             if it["doc"]:
                 block += f"\n  doc: {it['doc']}"
+            if it.get("callers"):
+                block += f"\n  {it['callers']}"
             add(block)
     if r.get("paths") or r.get("unreached"):
         from .connect import format_route_tree, _node_text, PROXIMITY_MAX_HOPS
@@ -778,7 +887,7 @@ def render(r: dict) -> str:
             remaining -= add(f"  {t['path']}  ({t['hits']} refs, lines {', '.join(map(str, t['lines']))})", remaining)
     remaining = int(allocations.get("patterns", budget) * 3.6)
     seen_patterns = set()
-    for it in r["items"]:
+    for it in (r["items"] if r.get("explain_patterns", True) else []):
         for p in it.get("patterns", []):
             key = (p["pattern"], it["path"])
             if key not in seen_patterns:

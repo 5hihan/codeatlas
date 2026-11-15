@@ -108,7 +108,8 @@ def test_hints_and_relationship_retrieval_in_normal_agent_views(app):
     detail = app.atlas.symbol_detail("records", "app/reader.py")
     assert "generators" in {p["pattern"] for p in detail["patterns"]["items"]}
     assert "Generators" in fmt.symbol_detail(detail)
-    result = context.task_context(app.ix, app.atlas, "invoice schema", include_source=False, token_budget=2500)
+    # pattern explanations are rendered when the task asks about constructs ("patterns"); they stay in the result either way
+    result = context.task_context(app.ix, app.atlas, "invoice schema patterns", include_source=False, token_budget=2500)
     reader = next(item for item in result["items"] if item["qualified"] == "records")
     assert "uses_schema schemas/invoice.schema.json" in reader["why"]
     assert "generators" in {p["pattern"] for p in reader["patterns"]}
