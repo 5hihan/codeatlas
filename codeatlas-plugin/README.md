@@ -33,8 +33,12 @@ environment for search-only redirects, or `off` to disable the guard.
 navigation question that must be answered with path:line evidence through CodeAtlas tools, and a non-code question that
 must not call them. The with/without-plugin delta is the number to beat when changing tools, descriptions or the guard.
 
-Without the `codeatlas` command on PATH the plugin is inert, not noisy: the server fails to start and both hooks exit
-without output. It does not install itself: a self-install hook would need a shell on every platform (Windows without
-Git Bash has none) and would show an error line at every session start where it cannot run, so installation stays
-with the one-line installer or `uv tool install codeatlas`. For the same reason there is no mod that answers Read/Grep
-in place: a denial already carries the answer, and in 24 measured plugin sessions the guard fired once.
+`hooks/register.js` is a mod (Claude Code 2.1.287+): it answers a whole-file Read of an indexed source file with the file's
+outline and a Grep for an identifier with its definitions and uses, in place, as the tool's own result, so the model
+needs no retry and sees no denial. Bounded reads, text regexes and unindexed files run unchanged; the PreToolUse
+guard still covers what the mod lets through (whole-file `cat`, edits).
+
+Without the `codeatlas` command on PATH the plugin is inert, not noisy: the server fails to start, the hooks exit
+without output and the mod lets every call through. It does not install itself: a self-install hook would need a
+shell on every platform (Windows without Git Bash has none) and would show an error line at every session start
+where it cannot run, so installation stays with the one-line installer or `uv tool install codeatlas`.

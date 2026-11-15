@@ -309,10 +309,12 @@ are always loaded while MCP tools are deferred, so the model reaches for them by
 PreToolUse hook that, in a repository with a `.codeatlas/index.db` and only for files the index knows, denies the
 built-in call and names the CodeAtlas call to make instead, so the model recovers in the same turn:
 
-| Built-in call | Redirected to |
+| Built-in call | What happens |
 |---|---|
-| Grep, Glob, `grep`/`rg`/`find` in any Bash statement | `grep`, `find_symbols`, `references`, `list_files` |
-| whole-file Read, `cat` through Bash | `file_outline`, then `symbol_source` for the declarations needed |
+| whole-file Read of an indexed source file | **answered in place** by the plugin's mod: the file's top-level declarations with line ranges, as the Read's own result (no denial, no retry) |
+| Grep for an identifier | **answered in place** by the mod: its definitions and its uses grouped by file, as the Grep's own result |
+| Glob, text-regex Grep, `grep`/`rg`/`find` in any Bash statement | denied, redirected to `grep`, `find_symbols`, `references`, `list_files` |
+| `cat` of an indexed file through Bash | denied, redirected to `file_outline`, then `symbol_source` for the declarations needed |
 | Edit whose old_string lies inside a declaration (up to 150 lines) | `replace_symbol("<the enclosing symbol>", ...)`, `insert_code` |
 | Write over an existing source file, `sed -i`, `>`, `tee`, inline scripts that write | `replace_symbol` / `insert_code` (Write is for new files) |
 | any command that sets `CODEATLAS_GUARD` | denied: the switch is the user's, not the model's |
@@ -321,9 +323,11 @@ Two details decide whether the guard holds. **Every statement is inspected**, so
 y); sed -n 1,50p $A | grep -v '^//'` does not hide its search behind a chain, and a `cd` carries into `$(...)`.
 **No deny message names the off switch**, so the model cannot talk itself out of the guard.
 
-What the index does not cover is never gated: unindexed files, docs and config, bounded partial reads (an offset
-with a limit of 250 lines or fewer), edits outside declarations, and anything in a directory outside the indexed
-repository, such as a reference checkout you are reading upstream logic from. That last one matters: CodeAtlas has
+The mod (`codeatlas-plugin/hooks/register.js`, Claude Code 2.1.287 or later) runs before the guard: when it can
+answer a Read or Grep from the index it does, and the guard never fires; what it lets through, the guard still
+judges. What the index does not cover is never gated or answered: unindexed files, docs and config, bounded partial
+reads (an offset with a limit of 250 lines or fewer), text regexes, edits outside declarations, and anything in a
+directory outside the indexed repository, such as a reference checkout you are reading upstream logic from. That last one matters: CodeAtlas has
 no index there, so a denial would leave no working tool. `CODEATLAS_GUARD=search` keeps only the search redirects
 and `CODEATLAS_GUARD=off` disables the guard, both set by you in your own environment.
 

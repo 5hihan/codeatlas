@@ -265,3 +265,27 @@ def test_denials_carry_the_answer(repo: Path):
     assert rx and "already knows" not in rx
     unknown = hook.decide({"tool_name": "Grep", "tool_input": {"pattern": "nothing_here", "path": str(repo)}, "cwd": str(repo)}, prefix)
     assert unknown and "already knows" not in unknown
+
+
+def test_hook_answer_serves_read_and_grep_from_the_index(repo: Path, capsys, monkeypatch):
+    monkeypatch.delenv("CODEATLAS_GUARD", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_GUARD_MODE", raising=False)
+    prefix = "mcp__plugin_codeatlas_atlas"
+    read = _run_hook(["answer", "--prefix", prefix], {"tool_name": "Read", "tool_input": {"file_path": str(repo / "app" / "svc.py")},
+                                                      "cwd": str(repo)}, capsys, monkeypatch)
+    assert "handle f:1-2; Store C:4-6 (1 members)" in read["result"] and "symbol_source" in read["result"]
+    bounded = _run_hook(["answer", "--prefix", prefix], {"tool_name": "Read", "tool_input": {"file_path": str(repo / "app" / "svc.py"),
+                                                         "offset": 1, "limit": 20}, "cwd": str(repo)}, capsys, monkeypatch)
+    assert bounded == {}, "a bounded window goes ahead"
+    grep = _run_hook(["answer", "--prefix", prefix], {"tool_name": "Grep", "tool_input": {"pattern": "handle", "path": str(repo)},
+                                                      "cwd": str(repo)}, capsys, monkeypatch)
+    assert "CodeAtlas already knows 'handle'" in grep["result"] and "references" in grep["result"]
+    regex = _run_hook(["answer", "--prefix", prefix], {"tool_name": "Grep", "tool_input": {"pattern": "def .*", "path": str(repo)},
+                                                       "cwd": str(repo)}, capsys, monkeypatch)
+    assert regex == {}, "a text regex is not an identifier: the tool should run"
+    other = _run_hook(["answer", "--prefix", prefix], {"tool_name": "Read", "tool_input": {"file_path": str(repo / "README.md")},
+                                                       "cwd": str(repo)}, capsys, monkeypatch)
+    assert other == {}, "files the index does not know are never answered"
+    monkeypatch.setenv("CODEATLAS_GUARD", "off")
+    assert _run_hook(["answer", "--prefix", prefix], {"tool_name": "Read", "tool_input": {"file_path": str(repo / "app" / "svc.py")},
+                                                      "cwd": str(repo)}, capsys, monkeypatch) == {}

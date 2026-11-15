@@ -21,6 +21,10 @@ Usage (hooks.json / settings.json)::
     codeatlas hook pretool [--prefix mcp__plugin_codeatlas_atlas] [--mode default|search|off]
     codeatlas hook session-start [--prefix ...]   SessionStart: a few lines of orientation (index size, which
                                                   tool to reach for) injected at startup, resume and after compaction
+    codeatlas hook answer [--prefix ...]          for the plugin's mod (hooks/register.js): given a Read or Grep call
+                                                  on stdin, print {"result": <text>} with the index's answer (the
+                                                  file's outline, the identifier's definitions and uses), or {} to
+                                                  let the call go ahead
 
 The same PreToolUse handler also auto-approves CodeAtlas's own read-only tools (READ_ONLY_TOOLS): a query of the
 index never needs a permission prompt, while edits, SNIPE state changes and test runs keep asking.
@@ -348,6 +352,23 @@ def _tail(prefix: str, *tools: str) -> str:
 REASON_MAX_CHARS = 3600   # a deny reason that carries the answer stays well under the hook output cap
 
 
+def identifier_files(root: Path, name: str, limit: int = 40) -> list[str]:
+    """Files that define or name an identifier (for a Grep answered from the index: its `filenames`)."""
+    try:
+        con = _connect(root)
+    except Exception:
+        return []
+    try:
+        rows = con.execute("SELECT DISTINCT f.path FROM refs r JOIN files f ON f.id=r.file_id WHERE r.name=? "
+                           "UNION SELECT DISTINCT f.path FROM symbols s JOIN files f ON f.id=s.file_id WHERE s.name=? "
+                           "ORDER BY 1 LIMIT ?", (name, name, limit)).fetchall()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
 def identifier_summary(root: Path, name: str) -> str:
     """What the index already knows about an identifier: definitions, then name matches grouped by file.
 
@@ -622,12 +643,60 @@ def session_context(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
     ])
 
 
+def answer(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[dict]:
+    """The index's answer to a built-in Read or Grep that the guard would deny: ``{"result": text}`` (plus
+    ``"files"`` for a Grep) with what the model should get instead of the tool's own output; None when the call
+    should simply go ahead.
+
+    Used by the plugin's mod (``hooks/register.js``), which answers the call in place: no denial, no retry. A whole-file
+    Read of an indexed source file becomes that file's top-level declarations with line ranges; a Grep for an
+    identifier becomes its definitions and its name matches grouped by file. Anything else (bounded reads, regex
+    searches, files the index does not know) returns None.
+    """
+    if _option("CODEATLAS_GUARD", "guard_mode", "default").lower() == "off":
+        return None
+    tool = event.get("tool_name") or ""
+    inp = event.get("tool_input") or {}
+    cwd = Path(event.get("cwd") or os.getcwd())
+    root = find_index(cwd)
+    if root is None:
+        return None
+    if tool == "Read":
+        fp = inp.get("file_path") or inp.get("path") or ""
+        if inp.get("limit") and int(inp.get("limit") or 0) <= READ_MAX_LINES:
+            return None   # a bounded window is allowed; the tool should run
+        hit = _indexed_source(root, fp)
+        if not hit:
+            return None
+        rel, info = hit
+        outline = outline_summary(root, rel, prefix).strip()
+        if not outline:
+            return None
+        return {"result": (
+            f"{rel}: {info['lines']} lines, {info['symbols']} symbols; the index answered this Read with the file's "
+            f"outline. {outline} Read one declaration with `{prefix}__symbol_source(\"<Name>\", path=\"{rel}\")`, "
+            f"or a line range with `{prefix}__symbol_source(\"{rel}:START-END\")`; `{prefix}__file_outline(\"{rel}\")` "
+            f"adds reference counts, imports and importers.")}
+    if tool == "Grep":
+        pattern = inp.get("pattern") or ""
+        where = inp.get("path") or str(cwd)
+        if not _IDENT.match(pattern) or not _inside(root, cwd, where):
+            return None
+        known = identifier_summary(root, pattern).strip()
+        if not known:
+            return None
+        return {"result": (f"{known} (name matches from the index, grouped by file; `{prefix}__references(\"{pattern}\")` "
+                           f"resolves them to one definition, `{prefix}__grep(pattern=...)` searches text)."),
+                "files": identifier_files(root, pattern)}
+    return None
+
+
 def run(argv: Optional[list[str]] = None) -> int:
-    """Entry point for ``codeatlas hook pretool`` / ``session-start``: read the event on stdin, print the hook
-    output, always exit 0 (a failing hook must never block the agent)."""
+    """Entry point for ``codeatlas hook pretool`` / ``session-start`` / ``answer``: read the event on stdin, print the
+    hook output, always exit 0 (a failing hook must never block the agent)."""
     import argparse
     ap = argparse.ArgumentParser(prog="codeatlas hook")
-    ap.add_argument("event", nargs="?", default="pretool", choices=["pretool", "session-start"])
+    ap.add_argument("event", nargs="?", default="pretool", choices=["pretool", "session-start", "answer"])
     ap.add_argument("--prefix", default=DEFAULT_PREFIX, help="MCP tool prefix to recommend")
     ap.add_argument("--mode", default=None, choices=["default", "search", "strict", "off"])
     ns = ap.parse_args(argv)
@@ -643,6 +712,13 @@ def run(argv: Optional[list[str]] = None) -> int:
         if text:
             sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                                 "additionalContext": text}}))
+        return 0
+    if ns.event == "answer":
+        try:
+            out = answer(event, ns.prefix)
+        except Exception:
+            out = None
+        sys.stdout.write(json.dumps(out or {}))
         return 0
     try:
         ok = approve(event, ns.prefix)

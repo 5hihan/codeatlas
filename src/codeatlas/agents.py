@@ -209,8 +209,10 @@ def plugin_hooks(prefix: str) -> dict:
     session-start``) runs at startup, resume, /clear and after every compaction: the index size and which tool to
     reach for first, so the first call of a session is a CodeAtlas call and the habit survives compaction.
     """
-    # exec form (command + args): each argument is passed as-is, no shell quoting, same on every platform
-    return {"hooks": {
+    # exec form (command + args): each argument is passed as-is, no shell quoting, same on every platform.
+    # `modules` registers the mod (hooks/register.js): it answers a whole-file Read or an identifier Grep of an
+    # indexed file from the index, in place, before the guard would have to deny it.
+    return {"modules": ["./register.js"], "hooks": {
         "SessionStart": [{
             "matcher": "startup|resume|clear|compact",
             "hooks": [{"type": "command", "command": "codeatlas",
@@ -230,6 +232,43 @@ def plugin_hooks(prefix: str) -> dict:
         ],
     }}
 
+
+MOD_JS = """// CodeAtlas mod: answer a built-in Read or Grep of an indexed source file from the index, in place.
+//
+// A whole-file Read becomes the file's top-level declarations with line ranges; a Grep for an identifier becomes
+// its definitions and name matches grouped by file. The model gets the answer as the tool's result: no denial, no
+// retry, no hook message. Anything the index cannot answer (bounded reads, text regexes, unindexed files, no
+// `codeatlas` on PATH) goes ahead unchanged, and the PreToolUse guard still applies to it.
+const PREFIX = '%(prefix)s'
+
+export function register(on, options) {
+  on('tool.call', { tool: ['Read', 'Grep'] }, async ($, e, next) => {
+    try {
+      const { tool, tool_use_id, consent, ...args } = e
+      const env = {}
+      if (options && options.guard_mode !== undefined) env.CLAUDE_PLUGIN_OPTION_GUARD_MODE = String(options.guard_mode)
+      const run = await $.process.run(['codeatlas', 'hook', 'answer', '--prefix', PREFIX],
+                                      { stdin: JSON.stringify({ tool_name: tool, tool_input: args }), timeoutMs: 8000, env })
+      if (run.exitCode === 0 && run.stdout.trim()) {
+        const answer = JSON.parse(run.stdout)
+        if (answer && typeof answer.result === 'string' && answer.result) {
+          // the engine checks `result` against the tool's own output shape
+          const text = answer.result
+          const numLines = text.split('\\n').length
+          if (tool === 'Read') {
+            return { result: { type: 'text', file: { filePath: String(args.file_path || ''), content: text, numLines, startLine: 1, totalLines: numLines } } }
+          }
+          const filenames = Array.isArray(answer.files) ? answer.files : []
+          return { result: { mode: 'content', content: text, numLines, numMatches: numLines, numFiles: filenames.length, filenames } }
+        }
+      }
+    } catch (err) {
+      // fall through: the tool runs as usual
+    }
+    return next(e)
+  })
+}
+"""
 
 EVALS = {
     # A realistic question in a tiny scaffolded repository; measured with and without the plugin by
@@ -416,12 +455,15 @@ def write_plugin(target: Path) -> list[str]:
                       "\"mcp__plugin_codeatlas_atlas__*\"`): a\nnavigation question that must be answered with path:line "
                       "evidence through CodeAtlas tools, and a non-code question that\nmust not call them. The "
                       "with/without-plugin delta is the number to beat when changing tools, descriptions or the guard.\n\n"
-                      "Without the `codeatlas` command on PATH the plugin is inert, not noisy: the server fails to start and both "
-                      "hooks exit\nwithout output. It does not install itself: a self-install hook would need a shell on every "
-                      "platform (Windows without\nGit Bash has none) and would show an error line at every session start where "
-                      "it cannot run, so installation stays\nwith the one-line installer or `uv tool install codeatlas`. For the "
-                      "same reason there is no mod that answers Read/Grep\nin place: a denial already carries the answer, and "
-                      "in 24 measured plugin sessions the guard fired once.\n"),
+                      "`hooks/register.js` is a mod (Claude Code 2.1.287+): it answers a whole-file Read of an indexed source file "
+                      "with the file's\noutline and a Grep for an identifier with its definitions and uses, in place, as the tool's "
+                      "own result, so the model\nneeds no retry and sees no denial. Bounded reads, text regexes and unindexed files "
+                      "run unchanged; the PreToolUse\nguard still covers what the mod lets through (whole-file `cat`, edits).\n\n"
+                      "Without the `codeatlas` command on PATH the plugin is inert, not noisy: the server fails to start, the hooks "
+                      "exit\nwithout output and the mod lets every call through. It does not install itself: a self-install hook "
+                      "would need a\nshell on every platform (Windows without Git Bash has none) and would show an error line at "
+                      "every session start\nwhere it cannot run, so installation stays with the one-line installer or "
+                      "`uv tool install codeatlas`.\n"),
     }
     for name, text in agent_files(PLUGIN_PREFIX).items():
         files[f"agents/{name}.md"] = text
@@ -429,6 +471,7 @@ def write_plugin(target: Path) -> list[str]:
         files[f"commands/{name}.md"] = text
     files.update(EVALS)
     files["evals/.gitignore"] = "results/\n"
+    files["hooks/register.js"] = MOD_JS % {"prefix": PLUGIN_PREFIX}
     for rel, text in files.items():
         p = target / rel
         p.parent.mkdir(parents=True, exist_ok=True)
