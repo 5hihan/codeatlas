@@ -60,6 +60,8 @@ COVERAGE_POWER = 1.5      # covering two task terms is worth more than twice one
                           # nine benchmark tasks; a body-parsing task's request_body_to_args moved from 6th to 3rd)
 EXACT_BOOST = 8.0         # exact-name match, absolute: a boost relative to the best score promoted every `match`/`run`
 FTS_LIMIT = 800
+CALLS_TERM_SHARE = 0.15   # per task term a symbol calls (request.body() for "body parsing"), as a share of the best score
+CALLS_TERM_MAX_SITES = 80 # a name called from more places than this (get, run, json) says nothing about the task
 RANK_WEIGHT = 2.0         # PageRank boost: 1 + RANK_WEIGHT * sqrt(rank / max_rank)
 TEST_FACTOR = 0.4
 EXAMPLE_FACTOR = 0.5
@@ -399,6 +401,9 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         s *= 1.0 + COVERAGE_WEIGHT * covered ** COVERAGE_POWER
         scores[sid] += s
         reasons[sid].append(f"matches {covered} task term(s)" if covered else "matches path")
+    # symbols selected by structure (the constructor of a named class, a symbol that calls a task term, a callee
+    # that names one) are not near-duplicates of their file's lexical hits: the per-file diversity penalty skips them
+    structural_ids: set[int] = set()
     # exact-name matches get a strong boost; a bare constructor name ("the Hono constructor") boosts only the
     # constructors of classes the task names, not every constructor in the repository
     exact_boost = EXACT_BOOST
@@ -416,6 +421,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                                (cls, *_CTOR_NAMES, *scope_args)):
                 scores[r[0]] += exact_boost * _path_factor(r[1])
                 reasons[r[0]].append(f"constructor of {r[2]}")
+                structural_ids.add(r[0])
     # A task may name a schema/config rather than a symbol. Resolve explicit consumers
     # from the persisted relationship index instead of guessing from matching names.
     from .relationships import relationships
@@ -468,6 +474,30 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 continue
             scores[r[0]] += 6.0
             reasons[r[0]].append("entry point")
+    # ---- 1c. what calls a term -----------------------------------------------------------
+    # "body parsing" happens where `request.body()` is called, not where something named body is declared; the
+    # reference table knows every call site and its enclosing symbol. Generic names (called from more than
+    # CALLS_TERM_MAX_SITES places) and sites in tests, samples and tooling are ignored.
+    best_lexical = max(scores.values(), default=0.0)
+    if best_lexical > 0:
+        called: dict[int, list[str]] = defaultdict(list)
+        for t in search_terms:
+            if len(t) < 4:
+                continue
+            rows = c.execute("SELECT r.enclosing_id, f.path FROM refs r JOIN files f ON f.id=r.file_id "
+                             "WHERE lower(r.name)=? AND r.kind IN ('call', 'new') AND r.enclosing_id IS NOT NULL "
+                             "GROUP BY r.enclosing_id", (t,)).fetchall()
+            sites = [(eid, path) for eid, path in rows if _path_factor(path) == 1.0]   # tests call everything
+            if not sites or len(sites) > CALLS_TERM_MAX_SITES:
+                continue
+            for eid, path in sites:
+                if scope and not (path == scope or path.startswith(scope + "/")):
+                    continue
+                called[eid].append(t)
+        for eid, ts in called.items():
+            scores[eid] += best_lexical * CALLS_TERM_SHARE * len(ts)
+            reasons[eid].append("calls " + ", ".join(f"{t}()" for t in ts[:3]))
+            structural_ids.add(eid)
     if not scores:
         result["notes"].append("no symbols matched; try broader terms or a different scope")
     # rank boost (+ hot graph: recently changed / active symbols)
@@ -569,6 +599,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                     ts = atlas.symbol_by_id(tid)
                     if ts and _covered(search_terms, f"{ts['name']} {ts.get('signature') or ''}".lower()):
                         sc = max(sc * (1.0 + COVERAGE_WEIGHT), best_score * 0.3)
+                        structural_ids.add(tid)
                     scores[tid] += sc
                     reasons[tid].append(why)
                 elif flow_question and scores[tid] < sc:
@@ -603,8 +634,8 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         per_file: dict[str, int] = defaultdict(int)
         adjusted: dict[int, float] = {}
         for sid in ranked:
-            if sid in path_ids:
-                adjusted[sid] = scores[sid]   # route nodes are not near-duplicates of each other
+            if sid in path_ids or sid in structural_ids:
+                adjusted[sid] = scores[sid]   # route nodes and structural picks are not near-duplicates of each other
                 continue
             s = atlas.symbol_by_id(sid)
             path = s["path"] if s else ""
