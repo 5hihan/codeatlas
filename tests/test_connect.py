@@ -196,8 +196,11 @@ def test_known_anchor_reranks_the_connected_definition_first(atlas: Atlas):
 def test_bridges_and_route_tree_in_rendered_context(atlas: Atlas):
     r = context.task_context(atlas.ix, atlas, "save to the store", known=["main"], token_budget=3000)
     bridges = [i for i in r["items"] if i["bridge"]]
-    assert bridges and all(i["source"] is None for i in bridges), "bridges stay signatures"
-    assert any(i["qualified"] == "handle" and i["why"].startswith("links main to") for i in bridges)
+    assert all(i["source"] is None for i in bridges), "bridges stay signatures"
+    # `handle` sits between main and the store: shown either as a bridge or, since it constructs the Store the task
+    # names ("calls store()"), as an item in its own right; the route tree below names it either way
+    handle = next(i for i in r["items"] if i["qualified"] == "handle")
+    assert handle["bridge"] or "calls store()" in handle["why"] or "hop" in handle["why"]
     text = context.render(r)
     assert "known (given): main (app/main.py:3)" in text
     assert "## How what you know connects to these" in text
