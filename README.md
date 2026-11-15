@@ -252,28 +252,60 @@ unless they deny or orient. (`task_context` has since been trimmed further to bo
 
 ### The plugin in real Claude Code sessions
 
-Claude Code 2.1.325 (`claude -p`, Sonnet) answering six relationship questions, three about fastapi (Python,
-135k lines) and three about hono (TypeScript, 95k lines): a "where is X and which test covers it" question, a "what
-breaks if X changes its signature" question and a "how does a request flow from A to B" question per repository.
-Each question ran four times per arm, once with only the built-in tools and once with the plugin loaded
-(`--plugin-dir`); the table is the mean of the three warm-cache passes (18 runs per arm), figures from Claude's own
-usage report, tool calls counted from the stream. Both arms reached the right functions and lines.
+Claude Code 2.1.325 (`claude -p`, Sonnet) answering ten questions about fastapi (Python, 135k lines) and hono
+(TypeScript, 95k lines). Six are narrow relationship questions, three per repository: "where is X and which test
+covers it", "what breaks if X changes its signature" and "how does a request flow from A to B". Four are task-shaped:
+"I want to add a body-size check to body parsing / a constructor option that changes route registration: which
+functions would I change, who calls them, which tests cover them", "how does an exception in a dependency become an
+HTTP error response" and "where is the request path normalised before routing, and which tests cover that". Each
+question ran with only the built-in tools and with the plugin loaded (`--plugin-dir`); the tables are means of the
+warm-cache passes (the first run of each question is dropped), figures from Claude's own usage report, tool calls
+counted from the stream. Both arms reached the right functions and lines on every question. The plugin arm is the
+0.1.3 build as committed; the baseline was run once and reused, since it does not change.
 
-| Mean per question, warm cache, 18 runs per arm | without plugin | with plugin |
-|---|---:|---:|
-| tool calls | 3.8 | 2.3 (-40%) |
-| whole files read | 1.4 | 0 |
-| API time | 9.8 s | 6.9 s (-30%) |
-| output tokens | 1,274 | 814 (-36%) |
-| new input tokens | 2,086 | 2,036 (-2%) |
-| cost | $0.027 | $0.023 (-17%) |
+| Mean per question, warm cache | without plugin (30 runs) | with plugin (20 runs) | Welch's t |
+|---|---:|---:|---:|
+| tool calls | 4.3 | 3.0 (-30%) | p = 0.008 |
+| Read calls | 1.4 | 0.2 (-86%) | p < 0.0001 |
+| tool errors | 0 | 0 | |
+| API time | 11.6 s | 9.5 s (-18%) | p = 0.07 |
+| output tokens | 1,506 | 1,135 (-25%) | p = 0.016 |
+| new input tokens | 3,034 | 3,032 (0%) | p = 1.0 |
+| input processed (new + cache reads) | 68,741 | 81,778 (+19%) | p = 0.056 |
+| cost | $0.034 | $0.031 (-7%) | p = 0.61 |
 
-Per repository: fastapi 3.0 vs 4.8 calls and $0.024 vs $0.030, hono 1.6 vs 2.8 calls and $0.022 vs $0.025. Five of
-the six questions cost less with the plugin; the hono "how does a request flow" question cost more ($0.037 vs
-$0.027) because the route answer plus the bodies the model then fetched outweighed reading two files. Of the 24
-plugin-arm runs, 23 had no tool error of any kind and none showed a permission prompt; the one error was a shell
-grep the guard refused, answered inside the refusal. The plugin arm never read a whole file: `task_context` 12
-times, `symbol_source` 22, `references` 9, `impact` 8, `find_symbols` 7 against 56 Greps and 32 Reads without it.
+The two kinds of question behave differently, so they are worth separating:
+
+| Mean per question, warm cache | narrow six: without (18) | with (12) | task-shaped four: without (12) | with (8) |
+|---|---:|---:|---:|---:|
+| tool calls | 3.8 | 2.1 (-45%, p = 0.001) | 5.1 | 4.4 (-14%, p = 0.29) |
+| Read calls | 1.4 | 0 (p = 0.0005) | 1.5 | 0.5 (-67%, p = 0.016) |
+| API time | 9.8 s | 6.9 s (-30%, p = 0.003) | 14.3 s | 13.5 s (-6%) |
+| output tokens | 1,274 | 820 (-36%, p = 0.002) | 1,854 | 1,609 (-13%, p = 0.18) |
+| new input tokens | 2,086 | 1,365 (-35%, p = 0.31) | 4,457 | 5,533 (+24%, p = 0.16) |
+| input processed | 66,000 | 65,900 (0%) | 72,853 | 105,594 (+45%, p = 0.001) |
+| cost | $0.027 | $0.020 (-27%, p = 0.086) | $0.043 | $0.048 (+12%, p = 0.29) |
+
+On the narrow questions the plugin answers in fewer, cheaper steps: `h_compose` ("what breaks if compose changes")
+went from 3.0 calls and $0.030 to one `impact` call and $0.009, the fastapi WebSocket route question from 6.7 calls
+and four Reads to 3.5 calls and none. Two narrow questions cost slightly more with the plugin (the hono match
+question, $0.018 to $0.022, and the hono request-flow question, $0.027 to $0.031): one `task_context` answer with
+route and bodies is larger than the two targeted greps the baseline happened to make. On the task-shaped questions
+the plugin saves few calls and puts more into context, not less: the model asks `task_context` for the change, then
+fetches two or three bodies with `symbol_source`, and each of those requests also carries the plugin's always-on
+prompt cost (3,627 tokens of tool names, instructions, always-loaded schemas and orientation). Cache reads are
+billed at a tenth of new input, which is why cost moved by 12% while input processed moved by 45%, and why neither
+difference is distinguishable from noise at this sample size. The honest reading: fewer tool calls, fewer output
+tokens and no whole-file reads are established across all ten questions; the cost saving is established only in
+direction on the narrow questions and absent on task-shaped ones.
+
+What the arms did: without the plugin, 75 Greps, 43 Reads, 9 shell commands and 2 Globs over 30 runs; with it,
+14 `task_context`, 12 `symbol_source`, 9 `references`, 4 `impact`, 4 `find_symbols`, one `file_outline`, one `symbol`,
+and 5 Greps, 4 Reads and 6 shell commands over 20 runs. None of the 30 plugin-arm runs (cold included) had a tool
+error of any kind or showed a permission prompt. That is the effect of the last two changes: the guard refuses only
+what the index answers better (whole-file Reads of indexed files, identifier greps) and the mod answers those in
+place, so the model sees an outline or a reference list where a refusal used to be. Before the mod, one run in 24
+had a refused shell grep.
 
 What moved these numbers during 0.1.3: `task_context` includes bodies only for tasks and "how does it work"
 questions (a "where is X" answer dropped from about 3,000 to 1,300-2,200 tokens); for "how does X reach Y"
@@ -284,23 +316,15 @@ callers in its reason. Before those changes the first three questions cost 13% m
 and used 56% more new input tokens. The always-load decision is measured, not assumed: with
 `CODEATLAS_ALWAYS_LOAD=none` the same questions took 6-7 calls instead of 2-4 (two `ToolSearch` round trips, then a
 fallback to Grep/Read) and cost 50-100% more. Auto-approve is measured too: with no permission rule for the server
-at all, five CodeAtlas calls ran without a prompt while an unlisted Bash call was refused. The plugin's always-on
-cost is +3,627 prompt tokens per request (tool names and instructions, the always-loaded schemas, the orientation,
-the skill and agent descriptions); 23 instead of 39 tools would save only about 390 of those, which confirms the
-other schemas are deferred.
+at all, five CodeAtlas calls ran without a prompt while an unlisted Bash call was refused. 23 instead of 39 tools
+would save only about 390 of the 3,627 always-on tokens, which confirms the other schemas are deferred.
 
 `claude plugin eval codeatlas-plugin --scaffold --mocks off --allow-tools "mcp__plugin_codeatlas_atlas__*"` runs the
 two bundled cases with and without the plugin. At the default three runs per case every run passed in both arms:
 the navigation question is answered with path:line evidence either way (through CodeAtlas tools and no whole-file
-read with the plugin, through Grep and two Reads without it; 6 turns against 5 in that set, 3 against 5 in an
-earlier single run), and the non-code question calls no CodeAtlas tool in any run, so the plugin does not trigger
-on general questions. About $9 of API calls paid for every
-real-session measurement in this section. The spread between runs is large, so the differences were tested
-(Welch's t, 18 warm runs per arm): fewer tool calls (p = 0.002), no whole-file reads (p = 0.0005), less API time
-(p = 0.0015) and fewer output tokens (p = 0.0017) are established; the 17% lower cost (p = 0.23) and the 2% fewer new
-input tokens (p = 0.93) are not distinguishable from noise at this sample size. In words: the plugin reliably answers
-with fewer, cheaper-to-produce steps and never reads whole files; it does not reliably put fewer input tokens into
-context than a careful grep-and-read baseline on narrow questions.
+read with the plugin, through Grep and two Reads without it), and the non-code question calls no CodeAtlas tool in
+any run, so the plugin does not trigger on general questions. About $10 of API calls paid for every real-session
+measurement in this section ($7.82 for the A/B runs, $0.88 for the evals, the rest for probes).
 
 ## The guard: advice becomes a rule
 
