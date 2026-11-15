@@ -63,10 +63,10 @@ def ev(tool: str, cwd: Path, **inp) -> dict:
 def test_grep_and_glob_are_redirected_when_indexed(indexed: Path):
     r = hook.decide(ev("Grep", indexed / "src", pattern="find_symbols"), P)
     assert r and f"{P}__grep(" in r and f"{P}__find_symbols" in r and "ToolSearch" in r
-    r = hook.decide(ev("Grep", indexed, pattern="TODO|FIXME"), P)
-    assert r and f"{P}__grep(" in r and "find_symbols(query" not in r  # not an identifier: no symbol hint
-    r = hook.decide(ev("Glob", indexed, pattern="**/*.py"), P)
-    assert r and f"{P}__list_files" in r
+    # a text regex and a Glob run unchanged: the index has nothing better than ripgrep for them (a denial there
+    # was measured as a pure retry tax)
+    assert hook.decide(ev("Grep", indexed, pattern="TODO|FIXME"), P) is None
+    assert hook.decide(ev("Glob", indexed, pattern="**/*.py"), P) is None
 
 
 def test_not_indexed_or_off_passes(tmp_path: Path, indexed: Path, monkeypatch):
@@ -101,11 +101,13 @@ def test_every_statement_is_inspected_not_just_the_first(indexed: Path):
     """`export X=1; cd src; A=$(find . -name y); sed -n 1,50p $A | grep -v '^//'` hid the search in v0.1.1."""
     for cmd in ("export FOO=1; cd src && rg -n foo .",
                 "cd src; ls; grep -rn foo .",
-                'A=$(find . -name "*.py"); echo $A',
-                "ls -la && find . -name '*.py'",
+                'A=$(grep -rn foo src); echo $A',
                 "python build.py\ngrep -rn foo src"):
         r = hook.decide(ev("Bash", indexed, command=cmd), P)
-        assert r and (f"{P}__grep(" in r or f"{P}__list_files" in r), cmd
+        assert r and f'{P}__references("foo")' in r, cmd
+    # listing files and text regexes run unchanged wherever they sit in the command
+    for cmd in ('A=$(find . -name "*.py"); echo $A', "ls -la && find . -name '*.py'", "cd src; grep -rn 'def .*(' ."):
+        assert hook.decide(ev("Bash", indexed, command=cmd), P) is None, cmd
 
 
 # ------------------------------------------------------------------ outside the indexed repository
@@ -151,9 +153,14 @@ def test_heredoc_bodies_are_not_parsed_as_shell(indexed: Path):
 
 def test_bash_grep_is_redirected_but_other_commands_pass(indexed: Path):
     r = hook.decide(ev("Bash", indexed, command="rg -n foo src"), P)
-    assert r and f"{P}__grep(" in r
+    assert r and f"{P}__references(\"foo\")" in r
+    assert hook.decide(ev("Bash", indexed, command="grep -rn 'def .*' src"), P) is None, "a text regex runs"
+    assert hook.decide(ev("Bash", indexed, command="find src -name '*.py'"), P) is None, "listing files runs"
     assert hook.decide(ev("Bash", indexed, command="pytest -q"), P) is None
     assert hook.decide(ev("Bash", indexed, command="git diff | grep '^+'"), P) is None
+    assert hook.bash_grep_identifier("grep -rn -e handle src") == "handle"
+    assert hook.bash_grep_identifier("rg --type py handle_request .") == "handle_request"
+    assert hook.bash_grep_identifier("grep -r 'a.*b' .") is None
 
 
 # ------------------------------------------------------------------ reading

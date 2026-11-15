@@ -256,6 +256,41 @@ def _search_dir(here: str, argv: list[str]) -> str:
     return _join(here, ops[-1]) if ops else (here or ".")
 
 
+def bash_grep_identifier(command: str) -> Optional[str]:
+    """The identifier a shell grep/rg searches for, when its pattern is one (``grep -rn foo src`` -> ``foo``);
+    statements inside ``$(...)`` and backticks count too."""
+    stmts: list[str] = []
+    for stmt in _STMT_SPLIT.split(_strip_heredocs(command)):
+        for inner in (m.group(1) or m.group(2) or "" for m in _SUBST.finditer(stmt)):
+            stmts.extend(_STMT_SPLIT.split(inner))
+        stmts.append(_SUBST.sub("SUBST", stmt))
+    for stmt in stmts:
+        first = next((a for a in (_argv(seg) for seg in stmt.split("|")) if a), None)
+        if not first:
+            continue
+        head = _head(first)
+        if head not in SEARCH_CMDS and not (head == "git" and len(first) > 1 and first[1] == "grep"):
+            continue
+        argv = first[2:] if head == "git" else first[1:]
+        pattern = None
+        skip = False
+        for i, a in enumerate(argv):
+            if skip:
+                skip = False
+                continue
+            if a in ("-e", "--regexp") and i + 1 < len(argv):
+                pattern = argv[i + 1]
+                break
+            if a.startswith("-"):
+                skip = a in ("-f", "--file", "--include", "--exclude", "-g", "--glob", "-t", "--type", "-A", "-B", "-C", "-m")
+                continue
+            pattern = a
+            break
+        if pattern and _IDENT.match(pattern):
+            return pattern
+    return None
+
+
 def bash_search(command: str) -> Optional[str]:
     """'grep' or 'find' when any statement of the command starts a text search / file listing, else None."""
     for kind, _ in bash_actions(command):
@@ -316,15 +351,12 @@ def decide(event: dict, prefix: str = DEFAULT_PREFIX, mode: str = "default") -> 
     if root is None:
         return None
     if tool == "Grep":
-        if not _inside(root, cwd, str(inp.get("path") or "")):
-            return None  # searching another tree: CodeAtlas does not index it
-        return _deny_grep(root, prefix, str(inp.get("pattern") or ""))
+        pattern = str(inp.get("pattern") or "")
+        if not _inside(root, cwd, str(inp.get("path") or "")) or not _IDENT.match(pattern):
+            return None  # another tree, or a text regex: ripgrep is the right tool, the index has nothing better
+        return _deny_grep(root, prefix, pattern)
     if tool == "Glob":
-        if not _inside(root, cwd, str(inp.get("path") or "")):
-            return None
-        return (f"This repository is indexed by CodeAtlas ({root}). Use `{prefix}__list_files(prefix=\"dir/\")` to list "
-                f"source files (with language, line and symbol counts) or `{prefix}__find_symbols(query)` to locate a "
-                f"symbol, instead of Glob." + _tail(prefix, "grep"))
+        return None  # listing files is cheap and the index has no better answer (measured: a denial here is pure cost)
     if tool == "Bash":
         return _deny_bash(root, cwd, prefix, str(inp.get("command") or ""), full)
     if not full:
@@ -431,15 +463,13 @@ def _deny_bash(root: Path, cwd: Path, prefix: str, command: str, full: bool) -> 
                 f"`{prefix}__symbol_source`, and `{prefix}__replace_symbol` / `{prefix}__insert_code` to change code. "
                 f"If the command works on a directory outside this repository, it is not gated at all: run it "
                 f"unchanged." + _tail(prefix, "grep", "symbol_source", "replace_symbol"))
+    ident = bash_grep_identifier(command)
     for kind, operand in acts:
-        if kind in ("grep", "find") and _inside(root, cwd, operand or "."):
-            if kind == "grep":
-                return (f"This repository is indexed by CodeAtlas ({root}). Do not shell out to grep/rg in any "
-                        f"statement of a command: use `{prefix}__grep(pattern=..., glob=...)` for text, "
-                        f"`{prefix}__find_symbols` / `{prefix}__references` for identifiers. A search of a directory "
-                        f"outside this repository is allowed." + _tail(prefix, "grep"))
-            return (f"This repository is indexed by CodeAtlas ({root}). Use `{prefix}__list_files(prefix=\"dir/\")` "
-                    f"instead of find. Listing a directory outside this repository is allowed." + _tail(prefix, "grep"))
+        if kind == "grep" and ident and _inside(root, cwd, operand or "."):
+            # a shell grep for an identifier: the index knows its definitions and uses; a text regex runs unchanged
+            return (f"This repository is indexed by CodeAtlas ({root}). For the identifier '{ident}' use "
+                    f"`{prefix}__references(\"{ident}\")` / `{prefix}__find_symbols(query=\"{ident}\")` instead of grep."
+                    + identifier_summary(root, ident) + _tail(prefix, "grep"))[:REASON_MAX_CHARS]
         if not full:
             continue
         if kind == "cat":
@@ -688,6 +718,18 @@ def answer(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[dict]:
         return {"result": (f"{known} (name matches from the index, grouped by file; `{prefix}__references(\"{pattern}\")` "
                            f"resolves them to one definition, `{prefix}__grep(pattern=...)` searches text)."),
                 "files": identifier_files(root, pattern)}
+    if tool == "Bash":
+        command = str(inp.get("command") or "")
+        ident = bash_grep_identifier(command)
+        acts = bash_actions(command)
+        # exactly one statement, and it is a grep for an identifier inside the repository
+        if not ident or [k for k, _ in acts] != ["grep"] or not _inside(root, cwd, acts[0][1] or "."):
+            return None
+        known = identifier_summary(root, ident).strip()
+        if not known:
+            return None
+        return {"result": (f"{known} (from the CodeAtlas index instead of grep; `{prefix}__references(\"{ident}\")` "
+                           f"resolves the matches to one definition)."), "files": identifier_files(root, ident)}
     return None
 
 

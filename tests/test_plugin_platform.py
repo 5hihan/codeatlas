@@ -260,9 +260,9 @@ def test_denials_carry_the_answer(repo: Path):
     read = hook.decide({"tool_name": "Read", "tool_input": {"file_path": str(repo / "app" / "svc.py")}, "cwd": str(repo)}, prefix)
     assert read and "Top-level declarations of app/svc.py: handle f:1-2; Store C:4-6 (1 members)" in read
     assert len(read) <= hook.REASON_MAX_CHARS and len(grep) <= hook.REASON_MAX_CHARS
-    # a regex that is not an identifier gets no summary; an unknown identifier gets none either
+    # a regex that is not an identifier is not gated at all; an unknown identifier gets a redirect without a summary
     rx = hook.decide({"tool_name": "Grep", "tool_input": {"pattern": "def .*\\(", "path": str(repo)}, "cwd": str(repo)}, prefix)
-    assert rx and "already knows" not in rx
+    assert rx is None
     unknown = hook.decide({"tool_name": "Grep", "tool_input": {"pattern": "nothing_here", "path": str(repo)}, "cwd": str(repo)}, prefix)
     assert unknown and "already knows" not in unknown
 
@@ -288,4 +288,16 @@ def test_hook_answer_serves_read_and_grep_from_the_index(repo: Path, capsys, mon
     assert other == {}, "files the index does not know are never answered"
     monkeypatch.setenv("CODEATLAS_GUARD", "off")
     assert _run_hook(["answer", "--prefix", prefix], {"tool_name": "Read", "tool_input": {"file_path": str(repo / "app" / "svc.py")},
+                                                      "cwd": str(repo)}, capsys, monkeypatch) == {}
+
+
+def test_hook_answer_serves_identifier_grep_through_bash(repo: Path, capsys, monkeypatch):
+    monkeypatch.delenv("CODEATLAS_GUARD", raising=False)
+    prefix = "mcp__plugin_codeatlas_atlas"
+    out = _run_hook(["answer", "--prefix", prefix], {"tool_name": "Bash", "tool_input": {"command": "grep -rn handle app/"},
+                                                     "cwd": str(repo)}, capsys, monkeypatch)
+    assert "CodeAtlas already knows 'handle'" in out["result"] and out["files"] == ["app/svc.py"]
+    assert _run_hook(["answer", "--prefix", prefix], {"tool_name": "Bash", "tool_input": {"command": "grep -rn 'def .*' app/ && ls"},
+                                                      "cwd": str(repo)}, capsys, monkeypatch) == {}
+    assert _run_hook(["answer", "--prefix", prefix], {"tool_name": "Bash", "tool_input": {"command": "pytest -q"},
                                                       "cwd": str(repo)}, capsys, monkeypatch) == {}
