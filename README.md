@@ -347,10 +347,14 @@ cost 50-100% more. Auto-approve is measured too: with no permission rule for the
 ran without a prompt while an unlisted Bash call was refused.
 
 `claude plugin eval codeatlas-plugin --scaffold --mocks off --allow-tools "mcp__plugin_codeatlas_atlas__*"` runs the
-two bundled cases with and without the plugin. At the default three runs per case every run passed in both arms:
-the navigation question is answered with path:line evidence either way (through CodeAtlas tools and no whole-file
-read with the plugin, through Grep and two Reads without it), and the non-code question calls no CodeAtlas tool in
-any run, so the plugin does not trigger on general questions.
+two bundled cases with and without the plugin. On this build every run passed in both arms: the navigation question
+is answered with path:line evidence either way, through one `task_context` and two `symbol_source` calls (and one
+`ToolSearch`) with the plugin, through two Greps and two whole-file Reads without it, five turns each; the non-code
+question calls no CodeAtlas tool in any run, so the plugin does not trigger on general questions. On the eval's
+small fixture the plugin arm costs more ($0.063 against $0.036 a run), because the always-on prompt dominates a
+repository of a dozen files; the savings above come from repositories where a grep returns pages. Run with the
+`codeatlas` binary off PATH, the plugin is inert: the same suite still passed every run through Grep and Read with
+no tool error, which is the documented failure mode (the hooks and the server exit quietly, nothing is gated).
 
 ## The guard: advice becomes a rule
 
