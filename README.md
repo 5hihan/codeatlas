@@ -267,11 +267,11 @@ covers it", "what breaks if X changes its signature" and "how does a request flo
 "I want to add a body-size check to body parsing / a constructor option that changes route registration: which
 functions would I change, who calls them, which tests cover them", "how does an exception in a dependency become an
 HTTP error response" and "where is the request path normalised before routing, and which tests cover that". Each
-question ran with only the built-in tools and with the plugin loaded (`--plugin-dir`); the baseline arm is the
-sum of two rounds (four and five passes per question), the plugin arm seven passes per question of this build as
-committed; the tables are means of the warm-cache passes (the first run of each question in each round is
-dropped), 70 baseline and 60 plugin runs, figures from Claude's own usage report, tool calls counted from the
-stream. Both arms reached the right functions and lines on every question. One caveat on method: the
+question ran with only the built-in tools and with the plugin loaded (`--plugin-dir`), in rounds of four to seven
+passes per question, the last round six passes in both arms interleaved; the tables are means of the warm-cache
+passes (the first run of each question in each round is dropped), 120 baseline and 110 plugin runs of this build as
+committed, figures from Claude's own usage report, tool calls counted from the stream. Both arms reached the right
+functions and lines on every question. One caveat on method: the
 retrieval changes in this build were made while looking at `task_context`'s output for these ten questions, so
 they are not a held-out set; the nine-task precision benchmark above uses different questions and moved from a mean
 reciprocal rank of 0.70 to 0.72 under the same changes.
@@ -281,53 +281,56 @@ question (the between-question spread, $0.021 to $0.048 a run, otherwise swamps 
 test over all runs and a paired test over the ten per-question means are given too; the cost reduction holds under
 all three.
 
-| Mean per question, warm cache | without plugin (70 runs) | with plugin (60 runs) | blocked p (95% CI) | pooled p | paired p |
+| Mean per question, warm cache | without plugin (120 runs) | with plugin (110 runs) | blocked p (95% CI) | pooled p | paired p |
 |---|---:|---:|---:|---:|---:|
-| tool calls | 4.4 | 2.1 (-52%) | < 0.0001 (-58% to -45%) | < 0.0001 | < 0.001 |
-| Read calls | 1.4 | 0.13 (-91%) | < 0.0001 | < 0.0001 | 0.001 |
-| tool errors | 1 in 70 | 1 in 60 (a refused compound shell grep, answered in the refusal) | | | |
-| API time | 12.1 s | 8.2 s (-32%) | < 0.0001 (-37% to -28%) | < 0.0001 | < 0.001 |
-| output tokens | 1,530 | 971 (-37%) | < 0.0001 (-41% to -32%) | < 0.0001 | < 0.001 |
-| new input tokens | 3,177 | 2,474 (-22%) | 0.002 (-36% to -8%) | 0.03 | 0.19 |
-| cache-read tokens | 67,413 | 64,724 (-4%) | | | |
-| input processed (new + cache reads) | 70,591 | 67,197 (-5%) | 0.10 (-11% to +1%) | 0.22 | 0.50 |
-| cost | $0.035 | $0.026 (-25%) | < 0.0001 (-32% to -18%) | < 0.0001 | 0.011 |
+| tool calls | 4.2 | 2.3 (-46%) | < 0.0001 (-52% to -40%) | < 0.0001 | < 0.001 |
+| Read calls | 1.4 | 0.13 (-91%) | < 0.0001 | < 0.0001 | 0.002 |
+| tool errors | 1 in 120 | 1 in 110 (a refused compound shell grep, answered in the refusal) | | | |
+| API time | 12.0 s | 8.4 s (-30%) | < 0.0001 (-33% to -26%) | < 0.0001 | < 0.001 |
+| output tokens | 1,498 | 998 (-33%) | < 0.0001 (-37% to -30%) | < 0.0001 | < 0.001 |
+| new input tokens | 3,211 | 2,294 (-29%) | < 0.0001 (-39% to -19%) | 0.0002 | 0.016 |
+| input processed (new + cache reads) | 69,813 | 69,250 (-1%) | 0.74 (-6% to +4%) | 0.80 | 0.91 |
+| cost | $0.034 | $0.026 (-25%) | < 0.0001 (-30% to -20%) | < 0.0001 | 0.002 |
 
-Cost is lower on nine of the ten questions (the hono request-flow question costs more, $0.040 against $0.030: its
-first answer carries six route bodies and the model still fetched two of them again). Earlier builds of this
-section measured -20% (before the first answer carried test and call sites) and -22% (before it carried the route's
-bodies); the build after this one, with a further 300-token trim of the orientation and tool descriptions and a
-lift for a named symbol's callees, measured 2.7 calls a session instead of 2.1 and -13% on cost over another 70
-sessions, and was reverted.
+The last round alone, both arms fresh and interleaved (50 warm runs each): 3.9 to 2.4 calls, 1.34 to 0.12 Reads,
+11.9 to 8.7 s, 1,453 to 1,030 output tokens, 3,257 to 2,078 new input tokens, 68,723 to 71,713 input processed
+(+4%), $0.0341 to $0.0256 a question (-25%). Cost is lower on nine of the ten questions (the hono request-flow
+question is level, $0.032 against $0.030: its first answer carries six route bodies and the model still fetched two
+of them again). Earlier builds of this section measured -20% (before the first answer carried test and call sites)
+and -22% (before it carried the route's bodies); the build after this one, with a further 300-token trim of the
+orientation and tool descriptions and a lift for a named symbol's callees, measured 2.7 calls a session instead of
+2.1 and -13% on cost over another 70 sessions, and was reverted.
 
-The clearest wins are the relationship questions: "what breaks if compose changes" went from 3.0 calls and $0.029
-to one `impact` call and $0.010, "what breaks if request_body_to_args changes" from 3.9 calls and $0.023 to one
-call and $0.010, the dependency-exception question from 5.6 calls and $0.046 to 2.3 and $0.030, the WebSocket route
-question from 6.4 calls and $0.048 to 3.2 and $0.033, the body-size task from 5.4 calls and $0.048 to 2.5 and
-$0.035 (`task_context` names `request_body_to_args` and the closure that reads `request.body()`, with a window of
-source around the call). What the arms did: without the plugin, 75 Greps, 43 Reads, 9 shell commands and 2 Globs
-over the first 30 runs; with it, over the 60 warm runs, 47 `task_context`, 20 `symbol_source`, 18 `references`,
-12 `impact`, 3 `find_symbols`, and 10 shell commands, 9 Greps and 8 Reads; 3.1 model turns a session against about
-3.7.
+The clearest wins are the relationship questions: "what breaks if compose changes" went from 2.8 calls and $0.028
+to one `impact` call and $0.010, "what breaks if request_body_to_args changes" from 3.7 calls and $0.023 to one
+call and $0.010, the dependency-exception question from 5.1 calls and $0.045 to 2.4 and $0.031, the WebSocket route
+question from 6.2 calls and $0.048 to 3.5 and $0.033, the body-size task from 5.2 calls and $0.048 to 2.9 and
+$0.037 (`task_context` names `request_body_to_args` and the closure that reads `request.body()`, with a window of
+source around the call). The hono questions about path normalisation and the constructor option process more with
+the plugin (89k and 78k tokens against 62k and 64k): their first answers are 1.5k to 2.5k tokens and the model still
+makes about three calls, each re-reading them. What the arms did: without the plugin, 75 Greps, 43 Reads, 9 shell
+commands and 2 Globs over the first 30 runs; with it, over 60 warm runs, 47 `task_context`, 20 `symbol_source`,
+18 `references`, 12 `impact`, 3 `find_symbols`, and 10 shell commands, 9 Greps and 8 Reads; 3.1 model turns a
+session against about 3.7.
 
-The honest reading: fewer tool calls, fewer output tokens, less API time, few whole-file reads, 22% fewer new input
-tokens and a 25% lower cost are established by the blocked and pooled tests (new input is not by the paired one);
-total input processed is 5% lower with a confidence interval of -11% to +1%, so not established: the plugin's
-always-on prompt rides on every request as cache reads, while the tokens it saves are the expensive ones, output
-and new input. The one tool error in the baseline arm was a built-in Grep failing on a regex alternation; the one in
-the plugin arm was the guard refusing a two-statement shell command whose second grep was for an identifier, with
-the definition and callers in the refusal. Spend on every real-session measurement in this section: about $28 of
-API calls.
+The honest reading: fewer tool calls, fewer output tokens, less API time, few whole-file reads, 29% fewer new input
+tokens and a 25% lower cost are established by all three tests; total input processed, new input plus cache reads,
+is flat (-1%, confidence interval -6% to +4%): the plugin's always-on prompt rides on every request as cache reads,
+billed at a tenth of new input, while the tokens it saves are the expensive ones, output and new input. That is the
+whole token story: fewer tokens are generated and fewer are read fresh; the same total passes through the model.
+The one tool error in the baseline arm was a built-in Grep failing on a regex alternation; the one in the plugin arm
+was the guard refusing a two-statement shell command whose second grep was for an identifier, with the definition
+and callers in the refusal. Spend on every real-session measurement in this section: about $32 of API calls.
 
 #### Seamless, measured
 
 | What a user would notice | Measured |
 |---|---|
 | permission prompts for the plugin's tools | none: the read-only tools are auto-approved by a hook (with no permission rule at all, five CodeAtlas calls ran without a prompt while an unlisted Bash call was refused) |
-| tool errors or denials in the transcript | 1 in 70 plugin-arm runs including cold ones: a compound shell grep refused by the guard with the answer in the refusal (1 built-in Grep failure in 70 baseline runs) |
-| a refused Grep or Read | none reaches the model: a forced whole-file `Read src/compose.ts` came back as "src/compose.ts: 73 lines, 2 symbols; the index answered this Read with the file's outline. Top-level declarations: compose f:15-73; dispatch f:32-71. Read one declaration with symbol_source(...)", and the model answered from it; in the 70 measured plugin runs the model made 10 Reads, none of a whole indexed file, and 13 Greps, none for a bare identifier |
+| tool errors or denials in the transcript | 1 in 130 plugin-arm runs including cold ones: a compound shell grep refused by the guard with the answer in the refusal (1 built-in Grep failure in 120 baseline runs) |
+| a refused Grep or Read | none reaches the model: a forced whole-file `Read src/compose.ts` came back as "src/compose.ts: 73 lines, 2 symbols; the index answered this Read with the file's outline. Top-level declarations: compose f:15-73; dispatch f:32-71. Read one declaration with symbol_source(...)", and the model answered from it; in the 130 measured plugin runs the model made 16 Reads, none of a whole indexed file, and 41 Greps, 3 of them for a bare identifier and answered in place |
 | a tool that fails | answers "task_context failed (…): retry without optional arguments, or use find_symbols / symbol_source / references" instead of an opaque error; one build of this round had `task_context` fail on every scoped call, and the measurement caught it (6 of 30 runs fell back to Grep and Read) |
-| answers that talk about the tooling | 7 of 70 say their anchors come "from the CodeAtlas index" (the model attributing its source, as it says "from reading routing.py" without the plugin); none mention a hook, a refusal or a denied call |
+| answers that talk about the tooling | 12 of 130 say their anchors come "from the CodeAtlas index" (the model attributing its source, as it says "from reading routing.py" without the plugin); none mention a hook, a refusal or a denied call |
 | session start | +1.2 to +1.7 s on a one-turn `claude -p` session (MCP server start, index freshness check, SessionStart hook), 2.2-5.5 s without the plugin against 3.8-6.8 s with it, four pairs |
 | per tool call | about 40 ms of PreToolUse hook (20 ms of it Python start-up) |
 | files outside the index | docs, config and unindexed files are never gated |
