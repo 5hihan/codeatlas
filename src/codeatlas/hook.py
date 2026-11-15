@@ -660,10 +660,14 @@ def session_context(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
                 f"connections(target, known) for how code you know reaches code you need. The server still remembers "
                 f"what you looked at before compaction. Tools: {prefix}__*.")
     return "\n".join([
-        head + f" Use its MCP tools ({prefix}__*; see the server instructions) instead of reading files or grepping: "
-        "task_context(\"<what you are doing>\") first, then symbol_source / references / impact as needed.",
-        "A hook answers identifier Greps and whole-file Reads of indexed files from the index and points Edit/Write inside a "
-        "declaration to replace_symbol; docs, config and unindexed files are never gated.",
+        head + f" Use its MCP tools ({prefix}__*) instead of reading files or grepping; answers carry path:line anchors.",
+        "- task_context(\"<what you are doing>\", scope=\"dir/\") first: the relevant symbols with source, callers, tests and "
+        "config in one call, ranked by what you already looked at",
+        "- then symbol_source for a body, references / impact for who calls it and what breaks, find_symbols / file_outline to "
+        "locate, connections(target, known) for how A reaches B, replace_symbol / insert_code to edit in place",
+        "Never Grep for an identifier or Read a whole indexed file: the index answers both (a hook turns such calls into "
+        "index answers and points Edit/Write inside a declaration to replace_symbol); docs, config and unindexed files are "
+        "never gated.",
     ])
 
 
