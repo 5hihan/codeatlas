@@ -252,39 +252,39 @@ unless they deny or orient. (`task_context` has since been trimmed further to bo
 
 ### The plugin in real Claude Code sessions
 
-Claude Code 2.1.325 (`claude -p`, Sonnet) answering three relationship questions about the fastapi repository, once
-with only the built-in tools and once with the plugin loaded (`--plugin-dir`), same prompt, second run of each so the
-prompt cache is warm; figures from Claude's own usage report, tool calls counted from the stream.
+Claude Code 2.1.325 (`claude -p`, Sonnet) answering three relationship questions about the fastapi repository
+("where are dependencies resolved and which test covers it", "what breaks if `request_body_to_args` changes",
+"how does a WebSocket route reach its handler"), once with only the built-in tools and once with the plugin loaded
+(`--plugin-dir`), three passes each; the table is the mean of the two warm-cache passes per question, figures from
+Claude's own usage report, tool calls counted from the stream. Both arms reached the right functions and lines.
 
-| Three questions, warm cache | without plugin | with plugin |
+| Mean per question, warm cache | without plugin | with plugin |
 |---|---:|---:|
-| tool calls | 14 | 11 (-21%) |
-| whole files read | 6 | 0 |
-| API time | 32.7 s | 22.8 s (-30%) |
-| output tokens | 4,233 | 2,581 (-39%) |
-| new input tokens | 12,155 | 18,970 (+56%) |
-| cost | $0.113 | $0.128 (+13%) |
+| tool calls | 4.7 | 3.7 (-21%) |
+| whole files read | 2.2 | 0 |
+| API time | 11.5 s | 8.8 s (-23%) |
+| output tokens | 1,439 | 1,012 (-30%) |
+| new input tokens | 2,771 | 3,517 (+27%) |
+| cost | $0.033 | $0.034 |
 
-Both arms reached the right functions and lines. The plugin wins on calls, files, time and output; it loses on new
-input tokens and cost on these narrow questions because a `task_context` answer (about 2.5k tokens) is larger than
-a handful of targeted grep hits, and because the model still reached for Grep when asked "who calls X" and paid
-for the denied call. Two consequences shipped in 0.1.3: `task_context` includes fewer bodies by default, and a
-denial now carries the answer (the definitions and name matches of a denied identifier Grep, the top-level
-declarations of a denied whole-file Read), so the retry is often unnecessary. Re-running the "what breaks if
-`request_body_to_args` changes" question on that build: 2 calls instead of 5, no file read, 1,089 instead of 2,248
-new tokens, 6.2 s instead of 11.1 s, $0.018 instead of $0.031, the same callers in the answer. In that run the model
-went to `impact` directly (one lookup failed and was retried) and never reached for Grep, so the gain there came
-from the orientation's routing; the answer-carrying denial is measured only by its unit tests so far. Single runs:
-treat these as directional. The plugin's always-on cost in the
-same sessions is +3,627 prompt tokens per request (names and instructions of 39 deferred tools, the five
-always-loaded schemas, the orientation, the skill and agent descriptions); 23 instead of 39 tools would save only
-about 390 of those, which confirms the schemas are deferred.
+What moved these numbers during 0.1.3: `task_context` includes bodies only for tasks and "how does it work"
+questions (a "where is X" answer dropped from about 3,000 to 1,300-2,200 tokens), the orientation routes "who
+calls / what breaks" to `references` and `impact`, and the two are always-loaded. The remaining input-token gap is
+one question: the model opened "what breaks" with a shell grep for callers, which the harness blocked, then searched
+for `impact`; the final build always-loads `impact` and a denied identifier grep now carries the callers in its
+reason. The always-load decision is measured, not assumed: with
+`CODEATLAS_ALWAYS_LOAD=none` the same questions took 6-7 calls instead of 2-4 (two `ToolSearch` round trips, then a
+fallback to Grep/Read) and cost 50-100% more. Auto-approve is measured too: with no permission rule for the server
+at all, five CodeAtlas calls ran without a prompt while an unlisted Bash call was refused. The plugin's always-on
+cost is +3,627 prompt tokens per request (tool names and instructions, the always-loaded schemas, the orientation,
+the skill and agent descriptions); 23 instead of 39 tools would save only about 390 of those, which confirms the
+other schemas are deferred.
 
 `claude plugin eval codeatlas-plugin --scaffold --mocks off --allow-tools "mcp__plugin_codeatlas_atlas__*"` runs the
 two bundled cases with and without the plugin: the navigation question passes in both arms (with the plugin in 3
 turns and no whole-file read, without it in 5 turns with two Reads), and the non-code question calls no CodeAtlas
-tool in either arm, so the plugin does not trigger on general questions. About $3 of API calls paid for all of the
-real-session measurements above.
+tool in either arm, so the plugin does not trigger on general questions. About $5 of API calls paid for every
+real-session measurement in this section. Single-digit runs: treat the percentages as directional.
 
 ## The guard: advice becomes a rule
 
