@@ -272,8 +272,10 @@ for the denied call. Two consequences shipped in 0.1.3: `task_context` includes 
 denial now carries the answer (the definitions and name matches of a denied identifier Grep, the top-level
 declarations of a denied whole-file Read), so the retry is often unnecessary. Re-running the "what breaks if
 `request_body_to_args` changes" question on that build: 2 calls instead of 5, no file read, 1,089 instead of 2,248
-new tokens, 6.2 s instead of 11.1 s, $0.018 instead of $0.031, same callers and tests in the answer; the one denied
-Grep returned the callers inside its reason. The plugin's always-on cost in the
+new tokens, 6.2 s instead of 11.1 s, $0.018 instead of $0.031, the same callers in the answer. In that run the model
+went to `impact` directly (one lookup failed and was retried) and never reached for Grep, so the gain there came
+from the orientation's routing; the answer-carrying denial is measured only by its unit tests so far. Single runs:
+treat these as directional. The plugin's always-on cost in the
 same sessions is +3,627 prompt tokens per request (names and instructions of 39 deferred tools, the five
 always-loaded schemas, the orientation, the skill and agent descriptions); 23 instead of 39 tools would save only
 about 390 of those, which confirms the schemas are deferred.
