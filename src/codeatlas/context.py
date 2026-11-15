@@ -911,7 +911,7 @@ def _tests_line(c, s: dict) -> str:
         return ""
     files = sorted(((p, sorted(ls)) for p, ls in per.items()), key=lambda kv: -len(kv[1]))
     parts = [f"{p}:{', :'.join(map(str, ls[:3]))}" + (f" (+{len(ls) - 3})" if len(ls) > 3 else "") for p, ls in files[:3]]
-    return ("tests: " if len(files) > 3 else f"tests (all {len(files)} files): ") + "; ".join(parts) + (f" (+{len(files) - 3} files)" if len(files) > 3 else "")
+    return "tests: " + "; ".join(parts) + (f" (+{len(files) - 3} files)" if len(files) > 3 else "")
 
 
 def _callers_line(atlas: Atlas, sid: int, s: dict) -> str:
@@ -933,7 +933,7 @@ def _callers_line(atlas: Atlas, sid: int, s: dict) -> str:
         tail.append(f"+{len(code) - MAX_CALLERS_SHOWN} more: references(\"{s['name']}\")")
     if in_tests:
         tail.append(f"{in_tests} in tests")
-    text = ("callers: " if len(code) > MAX_CALLERS_SHOWN else f"callers (all {len(code)}): ") + (", ".join(shown) if shown else "only tests")
+    text = "callers: " + (", ".join(shown) if shown else "only tests")
     return text + (f" ({'; '.join(tail)})" if tail else "")
 
 
@@ -1035,12 +1035,8 @@ def render(r: dict) -> str:
         add(f"note: {note}")
     # Signatures and expansion handles remain visible even when bodies do not fit.
     if r["items"]:
-        with_body = sum(1 for it in r["items"] if it.get("source"))
         add(f"\n## Relevant symbols ({len(r['items'])} of {r.get('symbols_considered', 0)} considered; "
-            f"expand: symbol_source(\"<qualified>\", path=\"<path>\"))"
-            + (f"\nThe {with_body} bodies under ## Source below are complete unless marked '... more lines': do not fetch them "
-               f"again; a 'callers:' or 'tests:' line without '+N more' is the complete list." if with_body else
-               "\nA 'callers:' or 'tests:' line without '+N more' is the complete list; references() adds nothing to it."))
+            f"expand: symbol_source(\"<qualified>\", path=\"<path>\"))")
         for it in r["items"]:
             block = f"{it['kind']} {it['qualified']}  {it['path']}:{it['start_line']}-{it['end_line']}  [{it['why']}]"
             if it["signature"] and it["signature"].strip() != it["qualified"]:
