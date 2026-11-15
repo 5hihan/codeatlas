@@ -706,7 +706,8 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         else:
             # the callees of a symbol the task names are its mechanism (the constructor's #addRoute for "how routes
             # are registered"): scored against the best match, not the seed
-            expand_callees(sid, max(base * 0.35, best_score * 0.45) if sid in named_ids else base * 0.35, 1)
+            expand_callees(sid, max(base * 0.35, best_score * 0.45) if sid in named_ids else base * 0.35, 1,
+                           lift_existing=sid in named_ids)
 
     # ---- 3. tests & docs -------------------------------------------------------------
     ranked = sorted(scores, key=lambda s: -scores[s])

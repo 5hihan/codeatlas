@@ -662,12 +662,9 @@ def session_context(event: dict, prefix: str = DEFAULT_PREFIX) -> Optional[str]:
     return "\n".join([
         head + f" Use its MCP tools ({prefix}__*) instead of reading files or grepping; answers carry path:line anchors.",
         "- task_context(\"<what you are doing>\", scope=\"dir/\") first: the relevant symbols with source, callers, tests and "
-        "config in one call, ranked by what you already looked at",
-        "- then symbol_source for a body, references / impact for who calls it and what breaks, find_symbols / file_outline to "
-        "locate, connections(target, known) for how A reaches B, replace_symbol / insert_code to edit in place",
+        "config in one call; then symbol_source for a body, references / impact for who calls it, replace_symbol to edit",
         "Never Grep for an identifier or Read a whole indexed file: the index answers both (a hook turns such calls into "
-        "index answers and points Edit/Write inside a declaration to replace_symbol); docs, config and unindexed files are "
-        "never gated.",
+        "index answers); docs, config and unindexed files are never gated.",
     ])
 
 

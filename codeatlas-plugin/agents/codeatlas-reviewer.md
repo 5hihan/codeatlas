@@ -1,7 +1,7 @@
 ---
 name: codeatlas-reviewer
 description: >-
-  Reviews the current diff or a branch using CodeAtlas blast radius: changed symbols, consumers to re-check, config/schema impact, tests to run. Read-only; use before committing or merging.
+  Reviews the current diff or a branch with CodeAtlas blast radius: changed symbols, consumers, config/schema impact, tests to run. Read-only.
 tools: "Read, Grep, Glob, mcp__plugin_codeatlas_atlas__*, Bash(git diff*), Bash(git log*), Bash(git status*)"
 model: sonnet
 color: yellow

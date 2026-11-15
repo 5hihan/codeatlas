@@ -1,7 +1,7 @@
 ---
 name: codeatlas-navigator
 description: >-
-  Read-only code research with the CodeAtlas index. Use for "where is X", "what calls Y", "what breaks if Z changes", "which config/env/schema does this use", "how does this flow" questions; returns path:line evidence without reading whole files.
+  Read-only code research with the CodeAtlas index: where is X, what calls Y, what breaks if Z changes, how does this flow; path:line evidence without reading whole files.
 tools: "Read, Grep, Glob, mcp__plugin_codeatlas_atlas__*"
 model: sonnet
 color: cyan

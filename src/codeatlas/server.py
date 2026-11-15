@@ -24,14 +24,12 @@ log = logging.getLogger("codeatlas")
 
 INSTRUCTIONS = """CodeAtlas holds a tree-sitter map of this repository (symbols, references, call graph, imports, env keys, SQL
 tables); use its tools instead of Grep, Glob, Read and Edit on indexed source files. Answers are compact text with
-path:line anchors. Start a task with task_context("<what you are doing>", scope="dir/"): relevant symbols with
-source, callers, tests and config, ranked by how they connect to what you already looked at (known=[...] names
-it, known=[] starts fresh). Locate with find_symbols / file_outline, read with symbol / symbol_source, check
-references / impact / triggers before changing anything, connections(target, known) for how code you know reaches
-code you need, replace_symbol / insert_code to edit in place (parse-checked, re-indexed at once);
-change_context(base_ref) reviews what you changed. Fix work runs the SNIPE loop: next_snipe -> claim_snipe ->
-get_snipe_context -> patch the smallest surface -> verify_snipe; snipe_report feeds failures in; never widen a
-snipe into a refactor."""
+path:line anchors. Start with task_context("<what you are doing>", scope="dir/"): relevant symbols with source,
+callers, tests and config, ranked by what you already looked at (known=[...] names it, known=[] starts fresh). Then
+symbol_source for a body, references / impact before changing anything, find_symbols / file_outline to locate,
+connections(target, known) for how A reaches B, replace_symbol / insert_code to edit in place, change_context(base_ref)
+to review a change. Fix work: next_snipe -> claim_snipe -> get_snipe_context -> patch the smallest surface ->
+verify_snipe."""
 
 
 # Tools kept in Claude's context from the start (Claude Code defers the other MCP tool schemas behind a search):
@@ -242,13 +240,11 @@ def build_server(app: App):
     @tool
     def task_context(task: str, scope: str = "", token_budget: int = 0, include_source: Optional[bool] = None,
                      known: Optional[list[str]] = None) -> str:
-        """Start here for any task: the symbols relevant to the task text (search over names, signatures, docs and
-        module names, boosted by PageRank and graph proximity) with source for the strongest, their callers when
-        the task is a change, tests and config, in one budgeted answer with path:line anchors. scope = path
-        prefix. known = symbols/files/path:line you already understand (default: what you looked at this session;
-        [] = fresh): results are ranked by how they connect to it and the route to each is shown. Bodies are
-        included for tasks and "how does it work" questions, signatures only for "where is / who calls"
-        questions."""
+        """Start here: the symbols relevant to the task (names, signatures, docs, module names, graph proximity),
+        with source for the strongest, their callers and test sites when asked, in one budgeted answer with
+        path:line anchors. scope = path prefix. known = symbols/files/path:line you already understand (default:
+        what you looked at this session; [] = fresh): ranked by connection to it, route shown. Bodies for tasks
+        and "how" questions, signatures only for "where is / who calls"."""
         anchors, source = app.known_anchors(known)
         r = context.task_context(app.ix, app.atlas, task, scope or None, token_budget or None, include_source,
                                  known=anchors, known_source=source)
@@ -343,8 +339,8 @@ def build_server(app: App):
 
     @tool
     def references(name: str, path: str = "", kind: str = "", limit: int = 100, offset: int = 0) -> str:
-        """Every use of a name, grouped by file with line and enclosing symbol; path (or a qualified name) pins
-        one definition. Reports the true total and a next offset. kind: call | new | arg | ref | import."""
+        """Every use of a name, grouped by file with line and enclosing symbol; path or a qualified name pins one
+        definition. True total and a next offset. kind: call | new | arg | ref | import."""
         r = app.atlas.references(name, kind or None, limit, False, path or None, offset)
         if r.get("resolved_to") and r["definitions"]:
             d = r["definitions"][0]
@@ -353,8 +349,8 @@ def build_server(app: App):
 
     @tool
     def impact(name: str, path: str = "", depth: int = 3, full: bool = False) -> str:
-        """Blast radius: transitive callers up to depth hops, affected files and tests. Run before changing a
-        signature or behaviour. Crowded levels are grouped by file; full=True lists every symbol."""
+        """Blast radius: transitive callers up to depth hops with the direct callers' call sites, affected files
+        and test sites. Run before changing a signature; full=True lists every symbol."""
         d = app.atlas.impact(name, path or None, depth)
         if d.get("found"):
             app.working.note_symbol(d["root"])
