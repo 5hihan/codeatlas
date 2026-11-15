@@ -287,3 +287,20 @@ def test_cli_connections_and_context_known(repo: Path, capsys):
     cli.main(["context", "save to the store", "--known", "main", "--repo", str(repo)])
     out = capsys.readouterr().out
     assert "known (given): main" in out and "--calls@4--> handle" in out
+
+
+def test_task_context_includes_bodies_only_for_tasks_and_how_questions(atlas: Atlas):
+    from codeatlas.context import wants_source
+    assert not wants_source("where are dependencies resolved, and which test exercises that code?")
+    assert not wants_source("if request_body_to_args changed its signature, what would break? list its callers")
+    assert not wants_source("who calls Store.save")
+    assert wants_source("how does a websocket route get from registration to the handler")
+    assert wants_source("fix the discount so VIP codes stack")
+    assert wants_source("process the request and save it to the store")
+    loc = context.task_context(atlas.ix, atlas, "where is the request saved to the store")
+    assert loc["include_source"] is False and all(i["source"] is None for i in loc["items"])
+    assert "signatures only" in context.render(loc)
+    forced = context.task_context(atlas.ix, atlas, "where is the request saved to the store", include_source=True)
+    assert any(i["source"] for i in forced["items"])
+    how = context.task_context(atlas.ix, atlas, "how does the request get saved to the store")
+    assert how["include_source"] is True and any(i["source"] for i in how["items"])

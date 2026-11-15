@@ -269,13 +269,34 @@ def _covered(terms: list[str], own: str) -> int:
     return n
 
 
+_LOCATION_Q = re.compile(r"^\s*(where|which|who|what calls|what uses|what references|what breaks|what would break|list|find|"
+                         r"locate|show me where|is there)\b|\b(where is|where are|where does|which (test|file|function|class|module)|"
+                         r"who calls|what calls|callers of|references to|what breaks|would break|is defined|defined in)\b", re.I)
+_TASK_Q = re.compile(r"\b(fix|implement|add|change|refactor|debug|rewrite|extend|migrate|optimi[sz]e|why|how does|how do|"
+                     r"how is|how are|explain|understand|walk me through|make|write|update|rename|remove|replace|trace)\b", re.I)
+
+
+def wants_source(task: str) -> bool:
+    """Bodies by default only for tasks and "how does it work" questions.
+
+    A location question ("where is X, which test covers it", "what breaks if X changes") is answered by the
+    signatures, anchors, callers and tests; the bodies would be read and discarded. Measured in real sessions, they
+    were the whole gap between a task_context answer and a handful of grep hits.
+    """
+    if _LOCATION_Q.search(task) and not _TASK_Q.search(task):
+        return False
+    return True
+
+
 def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None, token_budget: Optional[int] = None,
-                 include_source: bool = True, max_symbols: int = 40, boost: Optional[set[str]] = None,
+                 include_source: Optional[bool] = None, max_symbols: int = 40, boost: Optional[set[str]] = None,
                  known: Optional[list[str]] = None, known_source: str = "given") -> dict:
     t0 = time.time()
     ensure_rank(ix)
     ensure_fts(ix)
     c = ix.conn
+    if include_source is None:
+        include_source = wants_source(task)
     terms = terms_from(task)
     scope = ix.rel(scope).rstrip("/") if scope and scope.strip() != "." else ""
     if isinstance(known, str):
@@ -284,7 +305,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     initial_plan = plan_context(ix, task=task, scope=scope, requested_budget=token_budget,
                                 signals={"known_count": len(known)} if known else None)
     result: dict = {"task": task, "terms": terms, "scope": scope or None, "index_version": ix.get_meta("last_update"),
-                    "budget": initial_plan["budget"], "budget_plan": initial_plan,
+                    "budget": initial_plan["budget"], "budget_plan": initial_plan, "include_source": include_source,
                     "items": [], "tests": [], "docs": [], "relationships": [],
                     "known": [], "known_source": known_source if known else None, "paths": [], "unreached": [],
                     "relationships_version": ix.get_meta("relationships_updated"),
@@ -647,7 +668,8 @@ def render(r: dict) -> str:
     if plan:
         stats, inputs = plan["scoped"], plan["inputs"]
         add(f"budget: {policy} ~{budget} tokens; scope {stats['files']} files; "
-            f"{inputs['candidate_count']} candidates; fanout {inputs['fanout']}")
+            f"{inputs['candidate_count']} candidates; fanout {inputs['fanout']}"
+            + ("" if r.get("include_source", True) else "; signatures only (a location question): symbol_source(name) for a body"))
     for note in r.get("notes", []):
         add(f"note: {note}")
     # Signatures and expansion handles remain visible even when bodies do not fit.

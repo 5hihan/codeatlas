@@ -237,14 +237,16 @@ def build_server(app: App):
                              exported_only=exported_only)
 
     @tool
-    def task_context(task: str, scope: Optional[str] = None, token_budget: Optional[int] = None, include_source: bool = True,
-                     max_symbols: int = 40, known: Optional[list[str]] = None) -> str:
+    def task_context(task: str, scope: Optional[str] = None, token_budget: Optional[int] = None,
+                     include_source: Optional[bool] = None, max_symbols: int = 40, known: Optional[list[str]] = None) -> str:
         """Start here for any task: the symbols relevant to the task text (stemmed search over names, signatures,
         docs and module names, boosted by PageRank and graph proximity), source for the strongest ones, tests and
         config/docs mentioning the terms, in one adaptive-budget answer with path:line anchors. scope limits to a
         path prefix. known = symbols, files or path:line you already understand (defaults to what you looked at
         this session; known=[] starts fresh): results are ranked by how they connect to it and the route to each is
-        shown (main --calls@4--> handle --calls@5--> process). Each item says why it is there."""
+        shown (main --calls@4--> handle --calls@5--> process). Each item says why it is there. include_source defaults
+        to bodies for tasks and "how does it work" questions, signatures only for "where is / who calls / what
+        breaks" questions (symbol_source fetches any body)."""
         anchors, source = app.known_anchors(known)
         r = context.task_context(app.ix, app.atlas, task, scope, token_budget, include_source, max_symbols,
                                  known=anchors, known_source=source)
