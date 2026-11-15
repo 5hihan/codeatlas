@@ -42,9 +42,12 @@ snipe into a refactor."""
 
 
 # Tools kept in Claude's context from the start (Claude Code defers the other MCP tool schemas behind a search):
-# the ones an agent reaches for first, so the first useful call needs no search round-trip.
+# the ones an agent reaches for first, so the first useful call needs no search round-trip. Measured in real
+# sessions: with none always-loaded the same questions took 6-7 calls instead of 2-4 (two ToolSearch round trips
+# and a fallback to Grep/Read) and cost 50-100% more; `references` and `impact` are where "who calls / what breaks"
+# questions go, so a search before them was the remaining waste.
 ALWAYS_LOAD = frozenset(os.environ.get("CODEATLAS_ALWAYS_LOAD",
-                                       "task_context,find_symbols,symbol,file_outline,symbol_source").split(","))
+                                       "task_context,find_symbols,symbol,file_outline,symbol_source,references,impact").split(","))
 
 
 class App:

@@ -153,10 +153,10 @@ def test_tool_annotations_and_always_load(repo: Path):
     async def go():
         tools = {t.name: t for t in await mcp.list_tools()}
         always = {n for n, t in tools.items() if (t.meta or {}).get("anthropic/alwaysLoad")}
-        assert always == set(ALWAYS_LOAD) and {"task_context", "file_outline", "symbol_source", "find_symbols"} <= always
-        assert 3 <= len(always) <= 5, "the documented 3-5 upfront tools: the rest stay deferred"
+        assert always == set(ALWAYS_LOAD) and {"task_context", "file_outline", "symbol_source", "find_symbols", "references", "impact"} <= always
+        assert 3 <= len(always) <= 8, "a handful of upfront tools: the other 32 stay deferred"
         upfront = sum(len(json.dumps({"n": t.name, "d": t.description, "s": t.input_schema})) for n, t in tools.items() if n in always)
-        assert upfront / 3.6 < 1200, f"always-on schema cost must stay about a thousand tokens, got ~{upfront / 3.6:.0f}"
+        assert upfront / 3.6 < 1800, f"always-on schema cost must stay well under two thousand tokens, got ~{upfront / 3.6:.0f}"
         for name in ("task_context", "connections", "symbol", "references", "impact", "grep", "next_snipe", "snipe_board"):
             a = tools[name].annotations
             assert a.read_only_hint and a.idempotent_hint and not a.destructive_hint and a.open_world_hint is False, name
