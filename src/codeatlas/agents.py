@@ -83,8 +83,8 @@ open questions. Prefer three precise findings over ten vague ones. Do not edit c
 
 SKILL = """---
 name: codeatlas
-description: Navigate, understand and fix code in a repository indexed by CodeAtlas instead of reading whole files or grepping: where something is implemented, what calls what, how one piece reaches another, what a change affects, which config/env/schema a symbol uses, fixing a failing test or bug.
-when_to_use: where is X, what calls Y, how does A reach B, what breaks if Z changes, fix this failing test
+description: Navigate, understand and fix code in a repository indexed by CodeAtlas (tree-sitter code map, config/schema relationships, SNIPE fix loop) instead of reading whole files or grepping: where something is implemented, what calls what, how one piece of code reaches another, what a change affects, which config/env/schema a symbol uses, fixing a failing test or bug.
+when_to_use: where is X, what calls Y, how does A reach B, what breaks if Z changes, which env var / table / config does this use, fix this failing test, find the bug
 allowed-tools: mcp__plugin_codeatlas_atlas__*
 ---
 
@@ -157,7 +157,7 @@ def agent_files(prefix: str) -> dict[str, str]:
         "codeatlas-navigator": f"""---
 name: codeatlas-navigator
 description: >-
-  Read-only code research with the CodeAtlas index: where is X, what calls Y, what breaks if Z changes, how does this flow; path:line evidence without reading whole files.
+  Read-only code research with the CodeAtlas index. Use for "where is X", "what calls Y", "what breaks if Z changes", "which config/env/schema does this use", "how does this flow" questions; returns path:line evidence without reading whole files.
 tools: "{nav_tools}"
 model: sonnet
 color: cyan
@@ -167,7 +167,7 @@ color: cyan
         "codeatlas-sniper": f"""---
 name: codeatlas-sniper
 description: >-
-  Fixes one concrete issue end to end with the SNIPE loop: a failing test, a reported bug, or the next ready issue on the board.
+  Fixes one concrete issue end to end with the SNIPE loop (next_snipe, claim, minimal context, smallest patch, verify). Use to fix a failing test, a reported bug, or the next ready issue on the SNIPE board.
 tools: "{fix_tools}"
 model: inherit
 color: red
@@ -177,7 +177,7 @@ color: red
         "codeatlas-reviewer": f"""---
 name: codeatlas-reviewer
 description: >-
-  Reviews the current diff or a branch with CodeAtlas blast radius: changed symbols, consumers, config/schema impact, tests to run. Read-only.
+  Reviews the current diff or a branch using CodeAtlas blast radius: changed symbols, consumers to re-check, config/schema impact, tests to run. Read-only; use before committing or merging.
 tools: "{nav_tools}, Bash(git diff*), Bash(git log*), Bash(git status*)"
 model: sonnet
 color: yellow

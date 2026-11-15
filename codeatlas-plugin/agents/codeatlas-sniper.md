@@ -1,7 +1,7 @@
 ---
 name: codeatlas-sniper
 description: >-
-  Fixes one concrete issue end to end with the SNIPE loop: a failing test, a reported bug, or the next ready issue on the board.
+  Fixes one concrete issue end to end with the SNIPE loop (next_snipe, claim, minimal context, smallest patch, verify). Use to fix a failing test, a reported bug, or the next ready issue on the SNIPE board.
 tools: "Read, Grep, Glob, Edit, Write, Bash, mcp__plugin_codeatlas_atlas__*"
 model: inherit
 color: red
