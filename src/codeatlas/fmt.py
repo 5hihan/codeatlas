@@ -275,7 +275,9 @@ def impact(d: dict, compact: bool = False) -> str:
         L.append(f"  module-level / callback call sites ({len(d['top_level_sites'])}): " +
                  ", ".join(f"{t['path']}:{t['line']}" for t in d["top_level_sites"][:12]))
     if d["tests"]:
-        L.append("  tests touching this: " + ", ".join(d["tests"][:10]))
+        sites = d.get("test_sites") or {}
+        L.append("  tests touching this: " + ", ".join(
+            p + (f" (:{', :'.join(map(str, sites[p]))})" if sites.get(p) else "") for p in d["tests"][:10]))
     else:
         L.append("  tests touching this: none found")
     if d.get("truncated"):

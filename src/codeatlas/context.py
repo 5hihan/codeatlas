@@ -52,12 +52,12 @@ DOC_EXT = (".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml", ".env", ".i
 # directory names that say nothing about what the code does
 _PATHWORD_IGNORE = frozenset("src lib app apps pkg pkgs internal main java com org io net js ts py index mod".split())
 # items below this fraction of the best score are a long lexical tail (shown only while the budget is unused)
-TAIL_CUTOFF = 0.3
+TAIL_CUTOFF = 0.2         # the item caps below bound the answer; a structural pick at a third of the best score stays
 MIN_ITEMS = 8
 # the list is what a model reads first and keeps in context for the rest of the session; measured on ten real
 # questions, items beyond these were never the ones it followed up on
-MAX_ITEMS_LOCATION = 12   # signatures-only answers ("where is X")
-MAX_ITEMS_TASK = 18       # answers with bodies
+MAX_ITEMS_LOCATION = 14   # signatures-only answers ("where is X")
+MAX_ITEMS_TASK = 20       # answers with bodies (the body-reading closure of a "body parsing" task sat 19th)
 SIG_CHARS = 150
 DOC_CHARS = 120
 BODY_KINDS = frozenset({"function", "method", "class", "struct", "module"})   # a type's signature already is its body
@@ -66,8 +66,8 @@ COVERAGE_WEIGHT = 0.6     # per task term the symbol's own text covers
 COVERAGE_POWER = 1.5      # covering two task terms is worth more than twice one rare term (MRR 0.70 -> 0.72 on the
                           # nine benchmark tasks; a body-parsing task's request_body_to_args moved from 6th to 3rd)
 EXACT_BOOST = 8.0         # exact-name match on a plain word, absolute: a relative boost promoted every `match`/`run`
-NAMED_SHARE = 0.6         # an identifier the task spells out (Hono.fetch, request_body_to_args, getPath) is the subject:
-                          # its definition gets this share of the best lexical score, and seeds the flow expansion
+NAMED_SHARE = 1.0         # an identifier the task spells out (Hono.fetch, request_body_to_args, getPath) is the subject:
+                          # its definition gets the best score added, so it leads, and its route is followed
 _IDENT_IN_TASK = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_#][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]{2,}")
 FTS_LIMIT = 800
 CALLS_TERM_SHARE = 0.15   # per task term a symbol calls (request.body() for "body parsing"), as a share of the best score
@@ -84,6 +84,9 @@ PRIVATE_FACTOR = 0.8      # private helpers are reached through their public cal
 FILE_DIVERSITY = 0.75     # the k-th candidate from one file counts FILE_DIVERSITY**k: spread the answer, outline the rest
 PATH_TERM_WEIGHT = 0.5    # per task term that names the symbol's module (directory or file): "dependencies" -> fastapi/dependencies/
 MAX_SOURCE_ITEMS = 4      # bodies are included for the strongest items only; the rest keep a signature and a handle
+MAX_ROUTE_BODIES = 6      # "how does A reach B": the bodies along the route are the answer (measured: each missing one
+                          # cost a symbol_source round trip, about 22k tokens of context re-read)
+WINDOW_LINES = 50         # an oversized function selected by its call sites gets a window of source around them
 MAX_SOURCE_LINES = 100    # longer bodies are read on demand with symbol_source
 
 
@@ -527,7 +530,8 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 called[eid].append(t)
                 call_sites[eid].append((t, lines[:4]))
         for eid, ts in called.items():
-            scores[eid] += best_lexical * CALLS_TERM_SHARE * len(ts)
+            # calling two of the task's terms (request.body() and Request(...)) is strong evidence
+            scores[eid] += best_lexical * CALLS_TERM_SHARE * len(ts) * (1.5 if len(ts) >= 2 else 1.0)
             reasons[eid].append("calls " + ", ".join(f"{t}()" for t in ts[:3]))
             structural_ids.add(eid)
     if not scores:
@@ -551,6 +555,21 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
             scores[r[0]] += max(EXACT_BOOST, NAMED_SHARE * best_ranked) * _path_factor(r[1])
             reasons[r[0]].insert(0, "named in the task")
             structural_ids.add(r[0]); named_ids.add(r[0])
+    # "how does a WebSocket route get from APIRouter registration to the handler": the class is named, the work is in
+    # the methods that match the task's words; they are named too, so the route is followed from them
+    for cid in list(named_ids):
+        cs = atlas.symbol_by_id(cid)
+        if not cs or cs["kind"] not in CLASS_KINDS:
+            continue
+        members = c.execute("SELECT s.id, s.name, s.signature, f.path FROM symbols s JOIN files f ON f.id=s.file_id "
+                            "WHERE s.parent_id=? AND s.kind IN ('method', 'function')", (cid,)).fetchall()
+        scored = sorted(((_covered(search_terms, f"{m[1]} {m[2] or ''}".lower()), m) for m in members), key=lambda x: -x[0])
+        for cov, m in scored[:2]:   # the best two: more would crowd the route's own bodies out
+            if cov <= 0:
+                break
+            scores[m[0]] += max(EXACT_BOOST, NAMED_SHARE * best_ranked) * (0.5 + 0.25 * cov) * _path_factor(m[3])
+            reasons[m[0]].insert(0, f"method of {cs['name']} matching the task")
+            structural_ids.add(m[0]); named_ids.add(m[0])
 
     # ---- 1b. what the agent already knows ---------------------------------------------
     # Candidates close to the known anchors in the connection graph are more likely to be what the task means
@@ -599,6 +618,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
 
     best_score = scores[seeds[0]] if seeds else 0.0
     path_ids: set[int] = set()   # nodes reached as a flow question's route: kept out of the per-file diversity penalty
+    named_route: dict[int, int] = {}   # nodes on the route from a symbol the task names -> hop (bodies go here first)
 
     def with_nested(sid: int) -> list[int]:
         """*sid* plus the closures defined inside it: a decorator factory's `decorator`, a handler's inner `app`.
@@ -612,13 +632,14 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                          (s["path"], sid, s["start_line"], s["end_line"])).fetchall()
         return [sid] + [r[0] for r in rows]
 
-    def expand_callees(sid: int, add_score: float, hop: int) -> list[int]:
+    def expand_callees(sid: int, add_score: float, hop: int, lift_existing: bool = False) -> list[int]:
         """Score the resolved callees of *sid* (and the constructor of a constructed class); return all of them,
         existing or new, so a further hop can continue through lexical hits as well."""
         targets_all = []
         src = atlas.symbol_by_id(sid)
         nested = with_nested(sid)
-        callees = [ce for nid in nested for ce in atlas.callees(nid, limit=12, resolve_as=sid)]
+        callees = [ce for nid in nested for ce in atlas.callees(nid, limit=24, resolve_as=sid)]   # compose() is the
+        # 15th call in Hono.#dispatch: a tighter limit dropped the middleware chain from the request-flow answer
         for ce in callees:
             t = ce.get("target")
             if not (t and t.get("id")):
@@ -636,17 +657,24 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 if tid in nested:
                     continue
                 why = f"called by {src['qualified']}" if hop == 1 else f"on the path from {src['qualified']}"
-                if tid not in scores:
-                    # a callee whose own name covers task terms (constructor -> #addRoute for "how routes are
-                    # registered") is the behaviour the task is about, not just a neighbour
-                    ts = atlas.symbol_by_id(tid)
-                    if ts and _covered(search_terms, f"{ts['name']} {ts.get('signature') or ''}".lower()):
+                # a callee whose own name covers task terms (constructor -> #addRoute for "how routes are
+                # registered") is the behaviour the task is about, not just a neighbour; the lift is smaller one
+                # hop further out, and never carries a hop-2 node past the hop-1 level
+                ts = atlas.symbol_by_id(tid)
+                covered_t = bool(ts and _covered(search_terms, f"{ts['name']} {ts.get('signature') or ''}".lower()))
+                if covered_t:
+                    structural_ids.add(tid)
+                    if src["id"] in named_ids:
+                        sc = max(sc, best_score * (0.3 if hop == 1 else 0.2))   # already scored against the best
+                    elif hop == 1:
                         sc = max(sc * (1.0 + COVERAGE_WEIGHT), best_score * 0.3)
-                        structural_ids.add(tid)
+                    else:   # a lift, but a hop-2 node stays below the hop-1 level it was reached from
+                        sc = min(sc * (1.0 + COVERAGE_WEIGHT / 2), add_score * 1.15)
+                if tid not in scores:
                     scores[tid] += sc
                     reasons[tid].append(why)
-                elif flow_question and scores[tid] < sc:
-                    # a weak lexical hit that sits on the path: for a flow question the path is the evidence
+                elif (flow_question or lift_existing) and scores[tid] < sc:
+                    # a weak lexical hit that sits on the path: the path is the evidence
                     scores[tid] = sc
                     reasons[tid].insert(0, why)
                 if flow_question:
@@ -660,17 +688,25 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
             if cl["id"] and cl["id"] not in scores:
                 scores[cl["id"]] += base * 0.45
                 reasons[cl["id"]].append(f"calls {atlas.symbol_by_id(sid)['qualified']}")
-        if flow_question and sid in seeds[:3]:
+        if flow_question and (sid in seeds[:3] or sid in named_ids):
             # "how does X reach Y": the path matters as much as the match, so path nodes are scored against the
             # best match (not the seed) and followed one hop further, through constructors and existing hits.
             # From a symbol the task names ("from Hono.fetch ...") the path is the answer: its nodes outrank
             # lexical hits that merely share the question's words
             h1, h2 = (0.6, 0.5) if sid in named_ids else (0.3, 0.25)
             first_hop = expand_callees(sid, max(base * 0.35, best_score * h1), 1)
+            if sid in named_ids:
+                for nid in first_hop:
+                    named_route.setdefault(nid, 1)
             for nid in first_hop[:8]:
-                expand_callees(nid, best_score * h2, 2)
+                second = expand_callees(nid, best_score * h2, 2)
+                if sid in named_ids:
+                    for nid2 in second:
+                        named_route.setdefault(nid2, 2)
         else:
-            expand_callees(sid, base * 0.35, 1)
+            # the callees of a symbol the task names are its mechanism (the constructor's #addRoute for "how routes
+            # are registered"): scored against the best match, not the seed
+            expand_callees(sid, max(base * 0.35, best_score * 0.45) if sid in named_ids else base * 0.35, 1)
 
     # ---- 3. tests & docs -------------------------------------------------------------
     ranked = sorted(scores, key=lambda s: -scores[s])
@@ -739,14 +775,29 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     caller_items = test_items = 0
     # bodies go to the symbols the task is about: the ones it names and the route from them first, then by score
     body_ids: set[int] = set()
+    window_ids: set[int] = set()
+    max_bodies = MAX_ROUTE_BODIES if flow_question else MAX_SOURCE_ITEMS
     if include_source:
-        order = [sid for sid in top if sid in named_ids or sid in path_ids] + [sid for sid in top if sid not in named_ids and sid not in path_ids]
+        # the symbols the task names, then the route from them (hop 1 before hop 2, best score first), then other
+        # route nodes, then the rest by score
+        rank_of = {sid: i for i, sid in enumerate(top)}
+        def _cov(sid: int) -> int:
+            s0 = atlas.symbol_by_id(sid)
+            return _covered(search_terms, f"{s0['name']} {s0.get('signature') or ''}".lower()) if s0 else 0
+        order = sorted(top, key=lambda sid: (0 if sid in named_ids else 1 if sid in named_route
+                                             else 2 if (sid in path_ids or rank_of[sid] < 3) else 3 if sid in call_sites else 4,
+                                             named_route.get(sid, 0) if sid in named_route else (0 if rank_of[sid] < 3 else 1),
+                                             -_cov(sid), rank_of[sid]))
         for sid in order:
             s0 = atlas.symbol_by_id(sid)
-            if s0 and s0["lines"] <= 160 and s0["kind"] in BODY_KINDS and sid not in bridge_ids:
+            if not s0 or sid in bridge_ids or s0["kind"] not in BODY_KINDS:
+                continue
+            if s0["lines"] <= 160:
                 body_ids.add(sid)
-                if len(body_ids) >= MAX_SOURCE_ITEMS:
-                    break
+            elif sid in call_sites:
+                window_ids.add(sid)   # too long to include: a window around the call sites instead
+            if len(body_ids) + len(window_ids) >= max_bodies:
+                break
 
     # Reserve dependency evidence and tests before adding optional source bodies.
     selected = {sid: atlas.symbol_by_id(sid) for sid in top}
@@ -764,6 +815,8 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
         "test_count": len(tests), "test_relevance": 1.0 if tests else 0.0, "known_count": len(anchor_labels)})
     result["budget_plan"], result["budget"] = plan, plan["budget"]
     allocations = plan["allocations"]
+    # a named route's bodies are the answer to "how does A reach B": they may take half again the planned share
+    source_cap = allocations["source"] * (1.5 if (flow_question and named_route) else 1.0)
     used = 0
     source_used = 0
     items = []
@@ -789,14 +842,25 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 "expand": f"symbol_source(\"{s['qualified']}\", path=\"{s['path']}\")"}
         used += cost
         # source bodies for the strongest items while budget allows (cap 120 lines each); bridges stay signatures
-        if sid in body_ids and source_used < allocations["source"]:
+        if sid in body_ids and source_used < source_cap:
             src = atlas.source(s["qualified"], s["path"], max_lines=MAX_SOURCE_LINES)
             if src.get("found"):
                 scost = estimate_tokens(src["text"])
-                if source_used + scost <= allocations["source"]:
+                if source_used + scost <= source_cap:
                     item["source"] = src["text"]
                     source_used += scost
                     included_spans.append((s["path"], s["start_line"], s["end_line"]))
+        elif sid in window_ids and source_used < source_cap:
+            lines = sorted(ln for _, ls in call_sites[sid] for ln in ls)
+            start = max(s["start_line"], lines[0] - 6)
+            end = min(s["end_line"], max(lines[-1], start + WINDOW_LINES - 1), start + WINDOW_LINES + 20)
+            src = atlas.source(f"{s['path']}:{start}-{end}", None, max_lines=WINDOW_LINES + 30)
+            if src.get("found"):
+                scost = estimate_tokens(src["text"])
+                if source_used + scost <= source_cap:
+                    item["source"] = src["text"]
+                    item["source_note"] = f"lines {start}-{end} of {s['start_line']}-{s['end_line']}, around the call sites"
+                    source_used += scost
         items.append(item)
         item["patterns"] = atlas.programming_patterns(s["path"], limit=4, start_line=s["start_line"],
                                                       end_line=s["end_line"])["items"]
@@ -804,22 +868,15 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 and s["kind"] in ("function", "method", "class") and not is_test_path(s["path"])):
             line = _callers_line(atlas, sid, s)
             if line:
-                ccost = estimate_tokens(line) + 1
-                if used + ccost <= allocations["symbols"]:
-                    item["callers"] = line
-                    used += ccost
-                    caller_items += 1
+                item["callers"] = line   # the evidence lines are small and are what the task asked for: not
+                caller_items += 1        # charged to the item budget (the render limit still bounds the whole)
         if show_tests and test_items < MAX_CALLER_ITEMS and s["kind"] in ("function", "method", "class") and not is_test_path(s["path"]):
             line = _tests_line(c, s)
             if line:
-                tcost = estimate_tokens(line) + 1
-                if used + tcost <= allocations["symbols"]:
-                    item["tests"] = line
-                    used += tcost
-                    test_items += 1
+                item["tests"] = line
+                test_items += 1
         if sid in call_sites:
             item["call_sites"] = "calls " + ", ".join(f"{t}() :" + " :".join(map(str, ls)) for t, ls in call_sites[sid][:3])
-            used += estimate_tokens(item["call_sites"]) + 1
     result["items"] = items
     result["tokens_used"] = used + source_used
     result["symbols_considered"] = len(scores)
@@ -1019,7 +1076,8 @@ def render(r: dict) -> str:
     remaining = int(allocations.get("source", budget) * 3.6)
     for it in r["items"]:
         if it["source"]:
-            remaining -= add(f"\n## Source: {it['path']}:{it['start_line']}\n{it['source']}", remaining)
+            head = f"\n## Source: {it['path']}:{it['start_line']}" + (f" ({it['source_note']})" if it.get("source_note") else "")
+            remaining -= add(f"{head}\n{it['source']}", remaining)
     if r["docs"]:
         add("\n## Config / docs mentioning the terms")
         for d in r["docs"]:

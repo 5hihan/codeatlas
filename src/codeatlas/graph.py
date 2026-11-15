@@ -531,6 +531,10 @@ class Atlas:
         deeper = bool(frontier)  # unexplored callers beyond `depth` hops (not a cap)
         files: Counter = Counter(e["path"] for e in edges)
         tests = [p for p in files if is_test_path(p)]
+        test_sites: dict[str, list[int]] = defaultdict(list)
+        for e in edges:
+            if is_test_path(e["path"]) and e["line"] not in test_sites[e["path"]]:
+                test_sites[e["path"]].append(e["line"])
         levels: dict[int, list[dict]] = defaultdict(list)
         # a direct caller's call sites: "list its callers with file:line" is answered without a references() call
         call_lines: dict[int, list[int]] = defaultdict(list)
@@ -549,7 +553,8 @@ class Atlas:
                 "levels": {str(k): v[:limit] for k, v in sorted(levels.items())},
                 "top_level_sites": top_level[:40],
                 "files": [{"path": p, "edges": n} for p, n in files.most_common(40)],
-                "tests": tests[:20], "truncated": truncated, "deeper": deeper,
+                "tests": tests[:20], "test_sites": {p: sorted(ls)[:3] for p, ls in test_sites.items()},
+                "truncated": truncated, "deeper": deeper,
                 "index_version": self.ix.get_meta("last_update")}
 
     def triggers(self, name: str, path: Optional[str] = None) -> dict:
