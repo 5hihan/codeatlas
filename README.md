@@ -260,19 +260,23 @@ Claude's own usage report, tool calls counted from the stream. Both arms reached
 
 | Mean per question, warm cache | without plugin | with plugin |
 |---|---:|---:|
-| tool calls | 4.7 | 3.7 (-21%) |
+| tool calls | 5.0 | 3.0 (-40%) |
 | whole files read | 2.2 | 0 |
-| API time | 11.5 s | 8.8 s (-23%) |
-| output tokens | 1,439 | 1,012 (-30%) |
-| new input tokens | 2,771 | 3,517 (+27%) |
-| cost | $0.033 | $0.034 |
+| API time | 11.7 s | 7.7 s (-34%) |
+| output tokens | 1,525 | 929 (-39%) |
+| new input tokens | 2,887 | 3,012 (+4%) |
+| cost | $0.035 | $0.029 (-17%) |
 
-What moved these numbers during 0.1.3: `task_context` includes bodies only for tasks and "how does it work"
-questions (a "where is X" answer dropped from about 3,000 to 1,300-2,200 tokens), the orientation routes "who
-calls / what breaks" to `references` and `impact`, and the two are always-loaded. The remaining input-token gap is
-one question: the model opened "what breaks" with a shell grep for callers, which the harness blocked, then searched
-for `impact`; the final build always-loads `impact` and a denied identifier grep now carries the callers in its
-reason. The always-load decision is measured, not assumed: with
+Per question: "where are dependencies resolved" 2.0 calls vs 5.0, $0.025 vs $0.032; "what breaks" 2.0 calls vs 4.5,
+810 vs 1,274 new tokens, $0.018 vs $0.026 (the plugin called `impact` then `references` in all three passes, the
+baseline grepped and read a file); "how does a WebSocket route reach its handler" 5.0 calls vs 5.5, zero files read
+against 4.5, $0.045 vs $0.046, the one question where the plugin's larger answers cost more input tokens than reading
+the files did. What moved these numbers during 0.1.3: `task_context` includes bodies only for tasks and "how does
+it work" questions (a "where is X" answer dropped from about 3,000 to 1,300-2,200 tokens), the orientation routes
+"who calls / what breaks" to `references` and `impact`, those two are always-loaded, and a denied identifier grep
+carries the callers in its reason. Before those changes the same three questions with the plugin cost 13% more than
+without and used 56% more new input tokens; the "what breaks" question went from 4 calls with two denied greps to 2.
+The always-load decision is measured, not assumed: with
 `CODEATLAS_ALWAYS_LOAD=none` the same questions took 6-7 calls instead of 2-4 (two `ToolSearch` round trips, then a
 fallback to Grep/Read) and cost 50-100% more. Auto-approve is measured too: with no permission rule for the server
 at all, five CodeAtlas calls ran without a prompt while an unlisted Bash call was refused. The plugin's always-on
