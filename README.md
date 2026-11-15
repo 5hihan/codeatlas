@@ -252,31 +252,36 @@ unless they deny or orient. (`task_context` has since been trimmed further to bo
 
 ### The plugin in real Claude Code sessions
 
-Claude Code 2.1.325 (`claude -p`, Sonnet) answering three relationship questions about the fastapi repository
-("where are dependencies resolved and which test covers it", "what breaks if `request_body_to_args` changes",
-"how does a WebSocket route reach its handler"), once with only the built-in tools and once with the plugin loaded
-(`--plugin-dir`), three passes each; the table is the mean of the two warm-cache passes per question, figures from
-Claude's own usage report, tool calls counted from the stream. Both arms reached the right functions and lines.
+Claude Code 2.1.325 (`claude -p`, Sonnet) answering six relationship questions, three about fastapi (Python,
+135k lines) and three about hono (TypeScript, 95k lines): a "where is X and which test covers it" question, a "what
+breaks if X changes its signature" question and a "how does a request flow from A to B" question per repository.
+Each question ran four times per arm, once with only the built-in tools and once with the plugin loaded
+(`--plugin-dir`); the table is the mean of the three warm-cache passes (18 runs per arm), figures from Claude's own
+usage report, tool calls counted from the stream. Both arms reached the right functions and lines.
 
-| Mean per question, warm cache | without plugin | with plugin |
+| Mean per question, warm cache, 18 runs per arm | without plugin | with plugin |
 |---|---:|---:|
-| tool calls | 5.0 | 3.0 (-40%) |
-| whole files read | 2.2 | 0 |
-| API time | 11.7 s | 7.7 s (-34%) |
-| output tokens | 1,525 | 929 (-39%) |
-| new input tokens | 2,887 | 3,012 (+4%) |
-| cost | $0.035 | $0.029 (-17%) |
+| tool calls | 3.8 | 2.3 (-40%) |
+| whole files read | 1.4 | 0 |
+| API time | 9.8 s | 6.9 s (-30%) |
+| output tokens | 1,274 | 814 (-36%) |
+| new input tokens | 2,086 | 2,036 (-2%) |
+| cost | $0.027 | $0.023 (-17%) |
 
-Per question: "where are dependencies resolved" 2.0 calls vs 5.0, $0.025 vs $0.032; "what breaks" 2.0 calls vs 4.5,
-810 vs 1,274 new tokens, $0.018 vs $0.026 (the plugin called `impact` then `references` in all three passes, the
-baseline grepped and read a file); "how does a WebSocket route reach its handler" 5.0 calls vs 5.5, zero files read
-against 4.5, $0.045 vs $0.046, the one question where the plugin's larger answers cost more input tokens than reading
-the files did. What moved these numbers during 0.1.3: `task_context` includes bodies only for tasks and "how does
-it work" questions (a "where is X" answer dropped from about 3,000 to 1,300-2,200 tokens), the orientation routes
-"who calls / what breaks" to `references` and `impact`, those two are always-loaded, and a denied identifier grep
-carries the callers in its reason. Before those changes the same three questions with the plugin cost 13% more than
-without and used 56% more new input tokens; the "what breaks" question went from 4 calls with two denied greps to 2.
-The always-load decision is measured, not assumed: with
+Per repository: fastapi 3.0 vs 4.8 calls and $0.024 vs $0.030, hono 1.6 vs 2.8 calls and $0.022 vs $0.025. Five of
+the six questions cost less with the plugin; the hono "how does a request flow" question cost more ($0.037 vs
+$0.027) because the route answer plus the bodies the model then fetched outweighed reading two files. Of the 24
+plugin-arm runs, 23 had no tool error of any kind and none showed a permission prompt; the one error was a shell
+grep the guard refused, answered inside the refusal. The plugin arm never read a whole file: `task_context` 12
+times, `symbol_source` 22, `references` 9, `impact` 8, `find_symbols` 7 against 56 Greps and 32 Reads without it.
+
+What moved these numbers during 0.1.3: `task_context` includes bodies only for tasks and "how does it work"
+questions (a "where is X" answer dropped from about 3,000 to 1,300-2,200 tokens); for "how does X reach Y"
+questions it follows the route (calls made inside closures count as the enclosing method's, constructing a class
+runs its constructor, route nodes are kept even when they are weak lexical matches); the orientation routes "who
+calls / what breaks" to `references` and `impact`, which are always-loaded; and a denied identifier grep carries the
+callers in its reason. Before those changes the first three questions cost 13% more with the plugin than without
+and used 56% more new input tokens. The always-load decision is measured, not assumed: with
 `CODEATLAS_ALWAYS_LOAD=none` the same questions took 6-7 calls instead of 2-4 (two `ToolSearch` round trips, then a
 fallback to Grep/Read) and cost 50-100% more. Auto-approve is measured too: with no permission rule for the server
 at all, five CodeAtlas calls ran without a prompt while an unlisted Bash call was refused. The plugin's always-on
@@ -287,8 +292,10 @@ other schemas are deferred.
 `claude plugin eval codeatlas-plugin --scaffold --mocks off --allow-tools "mcp__plugin_codeatlas_atlas__*"` runs the
 two bundled cases with and without the plugin: the navigation question passes in both arms (with the plugin in 3
 turns and no whole-file read, without it in 5 turns with two Reads), and the non-code question calls no CodeAtlas
-tool in either arm, so the plugin does not trigger on general questions. About $5 of API calls paid for every
-real-session measurement in this section. Single-digit runs: treat the percentages as directional.
+tool in either arm, so the plugin does not trigger on general questions. About $8 of API calls paid for every
+real-session measurement in this section; the spread between runs is large (standard deviation of new input tokens
+about 1,500-1,900 per question in both arms), so the per-question figures are indicative and the 18-run means are the
+numbers to quote.
 
 ## The guard: advice becomes a rule
 
