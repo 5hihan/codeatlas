@@ -412,10 +412,16 @@ def write_plugin(target: Path) -> list[str]:
                       "indexed repository (a reference checkout, another\nproject), where CodeAtlas has no index and the "
                       "shell is the only tool. Set `CODEATLAS_GUARD=search` in your own\nenvironment for search-only "
                       "redirects, or `off` to disable the guard.\n\n"
-                      "`evals/` holds `claude plugin eval` cases (run with `--scaffold`): a navigation question that must "
-                      "be answered with\npath:line evidence through CodeAtlas tools, and a non-code question that must not "
-                      "call them. The with/without-plugin\ndelta is the number to beat when changing tools, descriptions or "
-                      "the guard.\n"),
+                      "`evals/` holds `claude plugin eval` cases (run with `--scaffold --mocks off --allow-tools "
+                      "\"mcp__plugin_codeatlas_atlas__*\"`): a\nnavigation question that must be answered with path:line "
+                      "evidence through CodeAtlas tools, and a non-code question that\nmust not call them. The "
+                      "with/without-plugin delta is the number to beat when changing tools, descriptions or the guard.\n\n"
+                      "Without the `codeatlas` command on PATH the plugin is inert, not noisy: the server fails to start and both "
+                      "hooks exit\nwithout output. It does not install itself: a self-install hook would need a shell on every "
+                      "platform (Windows without\nGit Bash has none) and would show an error line at every session start where "
+                      "it cannot run, so installation stays\nwith the one-line installer or `uv tool install codeatlas`. For the "
+                      "same reason there is no mod that answers Read/Grep\nin place: a denial already carries the answer, and "
+                      "in 24 measured plugin sessions the guard fired once.\n"),
     }
     for name, text in agent_files(PLUGIN_PREFIX).items():
         files[f"agents/{name}.md"] = text

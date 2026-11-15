@@ -292,10 +292,13 @@ other schemas are deferred.
 `claude plugin eval codeatlas-plugin --scaffold --mocks off --allow-tools "mcp__plugin_codeatlas_atlas__*"` runs the
 two bundled cases with and without the plugin: the navigation question passes in both arms (with the plugin in 3
 turns and no whole-file read, without it in 5 turns with two Reads), and the non-code question calls no CodeAtlas
-tool in either arm, so the plugin does not trigger on general questions. About $8 of API calls paid for every
-real-session measurement in this section; the spread between runs is large (standard deviation of new input tokens
-about 1,500-1,900 per question in both arms), so the per-question figures are indicative and the 18-run means are the
-numbers to quote.
+tool in either arm, so the plugin does not trigger on general questions. About $9 of API calls paid for every
+real-session measurement in this section. The spread between runs is large, so the differences were tested
+(Welch's t, 18 warm runs per arm): fewer tool calls (p = 0.002), no whole-file reads (p = 0.0005), less API time
+(p = 0.0015) and fewer output tokens (p = 0.0017) are established; the 17% lower cost (p = 0.23) and the 2% fewer new
+input tokens (p = 0.93) are not distinguishable from noise at this sample size. In words: the plugin reliably answers
+with fewer, cheaper-to-produce steps and never reads whole files; it does not reliably put fewer input tokens into
+context than a careful grep-and-read baseline on narrow questions.
 
 ## The guard: advice becomes a rule
 
