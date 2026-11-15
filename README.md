@@ -290,9 +290,11 @@ the skill and agent descriptions); 23 instead of 39 tools would save only about 
 other schemas are deferred.
 
 `claude plugin eval codeatlas-plugin --scaffold --mocks off --allow-tools "mcp__plugin_codeatlas_atlas__*"` runs the
-two bundled cases with and without the plugin: the navigation question passes in both arms (with the plugin in 3
-turns and no whole-file read, without it in 5 turns with two Reads), and the non-code question calls no CodeAtlas
-tool in either arm, so the plugin does not trigger on general questions. About $9 of API calls paid for every
+two bundled cases with and without the plugin. At the default three runs per case every run passed in both arms:
+the navigation question is answered with path:line evidence either way (through CodeAtlas tools and no whole-file
+read with the plugin, through Grep and two Reads without it; 6 turns against 5 in that set, 3 against 5 in an
+earlier single run), and the non-code question calls no CodeAtlas tool in any run, so the plugin does not trigger
+on general questions. About $9 of API calls paid for every
 real-session measurement in this section. The spread between runs is large, so the differences were tested
 (Welch's t, 18 warm runs per arm): fewer tool calls (p = 0.002), no whole-file reads (p = 0.0005), less API time
 (p = 0.0015) and fewer output tokens (p = 0.0017) are established; the 17% lower cost (p = 0.23) and the 2% fewer new
