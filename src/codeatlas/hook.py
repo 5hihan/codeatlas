@@ -345,14 +345,60 @@ def _tail(prefix: str, *tools: str) -> str:
             f"outside this repository are not affected.)")
 
 
+REASON_MAX_CHARS = 3600   # a deny reason that carries the answer stays well under the hook output cap
+
+
+def identifier_summary(root: Path, name: str) -> str:
+    """What the index already knows about an identifier: definitions, then name matches grouped by file.
+
+    A denied Grep for an identifier usually asked "who uses this": answering inside the deny reason saves the
+    retry call. Name matches are unresolved, like grep's own hits; ``references`` resolves them.
+    """
+    try:
+        con = _connect(root)
+    except Exception:
+        return ""
+    try:
+        defs = con.execute("SELECT s.kind, s.qualified, f.path, s.start_line, s.end_line FROM symbols s "
+                           "JOIN files f ON f.id=s.file_id WHERE s.name=? ORDER BY f.path, s.start_line LIMIT 6", (name,)).fetchall()
+        def_lines = {(d["path"], d["start_line"]) for d in defs}
+        rows = con.execute("SELECT f.path, r.line, e.qualified AS enc FROM refs r JOIN files f ON f.id=r.file_id "
+                           "LEFT JOIN symbols e ON e.id=r.enclosing_id WHERE r.name=? ORDER BY f.path, r.line LIMIT 600",
+                           (name,)).fetchall()
+    except Exception:
+        return ""
+    finally:
+        con.close()
+    by_file: dict[str, list[str]] = {}
+    total = 0
+    for r in rows:
+        if (r["path"], r["line"]) in def_lines:
+            continue
+        total += 1
+        by_file.setdefault(r["path"], []).append(f"{r['line']}" + (f" (in {r['enc'].rsplit('.', 1)[-1]})" if r["enc"] else ""))
+    if not defs and not by_file:
+        return ""
+    parts = []
+    if defs:
+        parts.append("defined as " + "; ".join(f"{d['kind']} {d['qualified']} at {d['path']}:{d['start_line']}-{d['end_line']}" for d in defs))
+    if by_file:
+        files = sorted(by_file.items(), key=lambda kv: -len(kv[1]))
+        shown = "; ".join(f"{p}: {', '.join(v[:6])}{f' +{len(v) - 6}' if len(v) > 6 else ''}" for p, v in files[:8])
+        more = f"; +{len(files) - 8} more files" if len(files) > 8 else ""
+        parts.append(f"named in {total} place(s) across {len(by_file)} file(s): {shown}{more}")
+    return f" CodeAtlas already knows '{name}': " + ". ".join(parts) + "."
+
+
 def _deny_grep(root: Path, prefix: str, pattern: str) -> str:
     hint = (f"For an identifier like '{pattern}' prefer `{prefix}__find_symbols(query=\"{pattern}\")` and "
             f"`{prefix}__references(\"{pattern}\")`, which return definitions, callers and path:line anchors. "
             if _IDENT.match(pattern) else "")
-    return (f"This repository is indexed by CodeAtlas ({root}). Use `{prefix}__grep(pattern=..., glob=..., limit=...)` "
+    known = identifier_summary(root, pattern) if _IDENT.match(pattern) else ""
+    text = (f"This repository is indexed by CodeAtlas ({root}). Use `{prefix}__grep(pattern=..., glob=..., limit=...)` "
             f"instead of the built-in Grep: it searches the same files and returns path:line hits. {hint}"
             f"Use `{prefix}__task_context(task, scope)` when you are starting a task rather than looking for one string."
-            + _tail(prefix, "grep"))
+            + known + _tail(prefix, "grep"))
+    return text[:REASON_MAX_CHARS]
 
 
 def _deny_bash(root: Path, cwd: Path, prefix: str, command: str, full: bool) -> Optional[str]:
@@ -401,12 +447,39 @@ def _deny_read(root: Path, prefix: str, fp: str, via: str = "Read") -> Optional[
         return None
     rel, info = hit
     how = "Do not dump it with cat" if via == "cat" else "Do not Read the whole file"
-    return (f"{rel} is indexed by CodeAtlas ({info['lines']} lines, {info['symbols']} symbols). {how}: get its "
+    text = (f"{rel} is indexed by CodeAtlas ({info['lines']} lines, {info['symbols']} symbols). {how}: get its "
             f"structure with `{prefix}__file_outline(\"{rel}\")`, then read only the declarations you need with "
             f"`{prefix}__symbol_source(\"<Name or Class.method>\", path=\"{rel}\")` (or "
             f"`{prefix}__symbol_source(\"{rel}:START-END\")` for a line range). `{prefix}__task_context(task, scope)` "
             f"gathers the relevant symbols across files in one call. Read is allowed as a bounded window: an explicit "
-            f"offset with a limit of at most {READ_MAX_LINES} lines." + _tail(prefix, "file_outline", "symbol_source"))
+            f"offset with a limit of at most {READ_MAX_LINES} lines." + outline_summary(root, rel, prefix)
+            + _tail(prefix, "file_outline", "symbol_source"))
+    return text[:REASON_MAX_CHARS]
+
+
+def outline_summary(root: Path, rel: str, prefix: str, limit: int = 40) -> str:
+    """Top-level declarations of a file, one compact paragraph, so a denied Read already answers "what is in it"."""
+    try:
+        con = _connect(root)
+    except Exception:
+        return ""
+    try:
+        rows = con.execute(
+            "SELECT s.name, s.kind, s.start_line, s.end_line, (SELECT COUNT(*) FROM symbols c WHERE c.parent_id=s.id) AS members "
+            "FROM symbols s JOIN files f ON f.id=s.file_id WHERE f.path=? AND s.parent_id IS NULL ORDER BY s.start_line LIMIT ?",
+            (rel, limit + 1)).fetchall()
+    except Exception:
+        return ""
+    finally:
+        con.close()
+    if not rows:
+        return ""
+    icon = {"class": "C", "struct": "S", "interface": "I", "trait": "T", "enum": "E", "function": "f", "method": "m",
+            "type": "t", "module": "M", "constant": "k", "variable": "v"}
+    items = [f"{r['name']} {icon.get(r['kind'], r['kind'][:1])}:{r['start_line']}-{r['end_line']}"
+             + (f" ({r['members']} members)" if r["members"] else "") for r in rows[:limit]]
+    more = f"; +more: {prefix}__file_outline(\"{rel}\")" if len(rows) > limit else ""
+    return f" Top-level declarations of {rel}: " + "; ".join(items) + more + "."
 
 
 def _edit_ranges(root: Path, rel: str, edits: Iterable[dict]) -> list[tuple[int, int]]:

@@ -251,3 +251,17 @@ def test_user_config_options_reach_hook_and_manifest(repo: Path, capsys, monkeyp
     assert _run_hook(["session-start"], {"cwd": str(repo), "source": "startup"}, capsys, monkeypatch) is None
     assert _run_hook(["pretool", "--prefix", prefix], {"tool_name": "Grep", "tool_input": {"pattern": "handle", "path": str(repo)},
                                                         "hook_event_name": "PreToolUse", "cwd": str(repo)}, capsys, monkeypatch) is None
+
+
+def test_denials_carry_the_answer(repo: Path):
+    prefix = "mcp__plugin_codeatlas_atlas"
+    grep = hook.decide({"tool_name": "Grep", "tool_input": {"pattern": "handle", "path": str(repo)}, "cwd": str(repo)}, prefix)
+    assert grep and "CodeAtlas already knows 'handle'" in grep and "function handle at app/svc.py:1-2" in grep
+    read = hook.decide({"tool_name": "Read", "tool_input": {"file_path": str(repo / "app" / "svc.py")}, "cwd": str(repo)}, prefix)
+    assert read and "Top-level declarations of app/svc.py: handle f:1-2; Store C:4-6 (1 members)" in read
+    assert len(read) <= hook.REASON_MAX_CHARS and len(grep) <= hook.REASON_MAX_CHARS
+    # a regex that is not an identifier gets no summary; an unknown identifier gets none either
+    rx = hook.decide({"tool_name": "Grep", "tool_input": {"pattern": "def .*\\(", "path": str(repo)}, "cwd": str(repo)}, prefix)
+    assert rx and "already knows" not in rx
+    unknown = hook.decide({"tool_name": "Grep", "tool_input": {"pattern": "nothing_here", "path": str(repo)}, "cwd": str(repo)}, prefix)
+    assert unknown and "already knows" not in unknown
