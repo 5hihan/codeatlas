@@ -247,8 +247,42 @@ No single measurement got larger. The biggest single savings are hubs: `fastapi/
 tasks: the expected answer is in the top five results for 9/9 (was 7/9), mean reciprocal rank 0.54 to 0.72. Every
 fold names the call that lists the rest (`full=True`, `file_outline`, `references`), so nothing is hidden, only
 deferred. The hooks cost about 40 ms per tool call (20 ms of it Python start-up) and add nothing to the transcript
-unless they deny or orient. These are local estimates of tool output, not Claude's usage report; the
-`codeatlas-plugin/evals/` cases exist to measure the with/without-plugin delta with `claude plugin eval`.
+unless they deny or orient. (`task_context` has since been trimmed further to bodies for the strongest four items:
+24,408 tokens on the same nine tasks, -38% against 0.1.2.)
+
+### The plugin in real Claude Code sessions
+
+Claude Code 2.1.325 (`claude -p`, Sonnet) answering three relationship questions about the fastapi repository, once
+with only the built-in tools and once with the plugin loaded (`--plugin-dir`), same prompt, second run of each so the
+prompt cache is warm; figures from Claude's own usage report, tool calls counted from the stream.
+
+| Three questions, warm cache | without plugin | with plugin |
+|---|---:|---:|
+| tool calls | 14 | 11 (-21%) |
+| whole files read | 6 | 0 |
+| API time | 32.7 s | 22.8 s (-30%) |
+| output tokens | 4,233 | 2,581 (-39%) |
+| new input tokens | 12,155 | 18,970 (+56%) |
+| cost | $0.113 | $0.128 (+13%) |
+
+Both arms reached the right functions and lines. The plugin wins on calls, files, time and output; it loses on new
+input tokens and cost on these narrow questions because a `task_context` answer (about 2.5k tokens) is larger than
+a handful of targeted grep hits, and because the model still reached for Grep when asked "who calls X" and paid
+for the denied call. Two consequences shipped in 0.1.3: `task_context` includes fewer bodies by default, and a
+denial now carries the answer (the definitions and name matches of a denied identifier Grep, the top-level
+declarations of a denied whole-file Read), so the retry is often unnecessary. Re-running the "what breaks if
+`request_body_to_args` changes" question on that build: 2 calls instead of 5, no file read, 1,089 instead of 2,248
+new tokens, 6.2 s instead of 11.1 s, $0.018 instead of $0.031, same callers and tests in the answer; the one denied
+Grep returned the callers inside its reason. The plugin's always-on cost in the
+same sessions is +3,627 prompt tokens per request (names and instructions of 39 deferred tools, the five
+always-loaded schemas, the orientation, the skill and agent descriptions); 23 instead of 39 tools would save only
+about 390 of those, which confirms the schemas are deferred.
+
+`claude plugin eval codeatlas-plugin --scaffold --mocks off --allow-tools "mcp__plugin_codeatlas_atlas__*"` runs the
+two bundled cases with and without the plugin: the navigation question passes in both arms (with the plugin in 3
+turns and no whole-file read, without it in 5 turns with two Reads), and the non-code question calls no CodeAtlas
+tool in either arm, so the plugin does not trigger on general questions. About $3 of API calls paid for all of the
+real-session measurements above.
 
 ## The guard: advice becomes a rule
 
