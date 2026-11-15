@@ -87,8 +87,8 @@ MAX_SOURCE_ITEMS = 4      # bodies are included for the strongest items only; th
 MAX_ROUTE_BODIES = 6      # "how does A reach B": the bodies along the route are the answer (measured: each missing one
                           # cost a symbol_source round trip, about 22k tokens of context re-read)
 WINDOW_LINES = 50         # an oversized function selected by its call sites gets a window of source around them
-MAX_SOURCE_LINES = 60     # longer bodies are shown to here and read on demand with symbol_source: measured over
-                          # five-question conversations, every body in a first answer is re-read on each later turn
+MAX_SOURCE_LINES = 100    # longer bodies are shown to here with a pointer to the rest (a 60-line cap, measured, cost
+                          # more symbol_source round trips than the shorter answers saved: cost -25% became -19%)
 
 
 def split_words(s: str) -> list[str]:

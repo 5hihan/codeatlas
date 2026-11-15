@@ -343,9 +343,19 @@ with wide intervals at this sample size. The mechanism is the conversation: ever
 4k tokens, bodies included) stays in context and is re-read on every later turn of the session, and over five
 questions that outweighs the baseline's smaller Grep results and ranged Reads. The plugin's first answers were
 tuned on single-question sessions, where a body in the first answer is cheaper than the round trip it saves; in a
-long conversation the same body is paid again on every turn. A build for long sessions would cap bodies lower (four
-of at most 60 lines) and let the model fetch the rest; that is the next thing to measure, with multi-question
-sessions as the benchmark. Spend on every real-session measurement in this section: about $38 of API calls.
+long conversation the same body is paid again on every turn.
+
+That trade-off was then measured directly. A build that capped every body at 60 lines with a pointer to the rest,
+remembered every body shown so a later answer in the session does not repeat it, and stripped pydantic's parameter
+titles from the tool schemas (230 prompt tokens a request) was run through the same two benchmarks, plugin arm only:
+in five-question conversations it processed 357,702 tokens a session against the baseline's 327,748 (+9%, p = 0.42;
+the previous build +18%) at $0.340 (-8%); in single-question sessions it cost $0.028 (-19%, blocked p < 0.0001)
+against the previous build's $0.026 (-25%) with 2.4 calls a question against 2.1: the truncated bodies were fetched
+again. The cap was dropped; the title stripping and the memory of shown bodies, which change no answer's first
+turn, stay. The honest position on total tokens: this architecture does not reduce them. Per question they are
+flat; across a long conversation they rise by about a tenth, because the index's answers are richer than a grep's
+and stay in context, while the tokens they save are the generated and freshly read ones that carry the cost. Spend
+on every real-session measurement in this section: about $43 of API calls.
 
 #### Seamless, measured
 
