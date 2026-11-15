@@ -320,7 +320,32 @@ billed at a tenth of new input, while the tokens it saves are the expensive ones
 whole token story: fewer tokens are generated and fewer are read fresh; the same total passes through the model.
 The one tool error in the baseline arm was a built-in Grep failing on a regex alternation; the one in the plugin arm
 was the guard refusing a two-statement shell command whose second grep was for an identifier, with the definition
-and callers in the refusal. Spend on every real-session measurement in this section: about $32 of API calls.
+and callers in the refusal.
+
+#### Five questions in one conversation
+
+Single-question sessions flatter neither arm, so the five questions about each repository were also asked in one
+conversation (`--resume`), four sessions per arm per repository, means of the warm sessions (first per arm and
+repository dropped, 6 against 6):
+
+| Per five-question session | without plugin | with plugin | pooled p |
+|---|---:|---:|---:|
+| tool calls | 13.8 | 11.3 (-18%) | 0.32 |
+| Read calls | 5.2 | 0.3 (-94%) | 0.03 |
+| API time | 128 s | 103 s (-19%) | 0.014 |
+| output tokens | 5,486 | 4,403 (-20%) | 0.04 |
+| new input tokens | 12,527 | 13,010 (+4%) | 0.70 |
+| input processed | 327,748 | 385,742 (+18%) | 0.16 |
+| cost | $0.371 | $0.344 (-7%) | 0.42 |
+
+The gains in output, time and whole-file reads carry over; the cost gain shrinks and total tokens processed go up,
+with wide intervals at this sample size. The mechanism is the conversation: every `task_context` answer (1.5k to
+4k tokens, bodies included) stays in context and is re-read on every later turn of the session, and over five
+questions that outweighs the baseline's smaller Grep results and ranged Reads. The plugin's first answers were
+tuned on single-question sessions, where a body in the first answer is cheaper than the round trip it saves; in a
+long conversation the same body is paid again on every turn. A build for long sessions would cap bodies lower (four
+of at most 60 lines) and let the model fetch the rest; that is the next thing to measure, with multi-question
+sessions as the benchmark. Spend on every real-session measurement in this section: about $38 of API calls.
 
 #### Seamless, measured
 
