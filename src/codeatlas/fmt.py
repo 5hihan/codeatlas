@@ -267,7 +267,8 @@ def impact(d: dict, compact: bool = False) -> str:
         if compact and len(items) > COMPACT_IMPACT_LEVEL:
             L += _grouped(items, 10, "affected", f"impact(\"{r['qualified']}\", path=\"{r['path']}\", full=True)")
             continue
-        L += [f"    {i['qualified']}  {i['path']}:{i['line']}" for i in items[:25]]
+        L += [f"    {i['qualified']}  {i['path']}:{i['line']}"
+              + (f"  (calls at :{', :'.join(map(str, i['calls_at']))})" if i.get("calls_at") else "") for i in items[:25]]
         if len(items) > 25:
             L.append(f"    ... {len(items) - 25} more")
     if d.get("top_level_sites"):

@@ -532,12 +532,18 @@ class Atlas:
         files: Counter = Counter(e["path"] for e in edges)
         tests = [p for p in files if is_test_path(p)]
         levels: dict[int, list[dict]] = defaultdict(list)
+        # a direct caller's call sites: "list its callers with file:line" is answered without a references() call
+        call_lines: dict[int, list[int]] = defaultdict(list)
+        for e in edges:
+            if e["depth"] == 1 and e["from"] is not None:
+                call_lines[e["from"]].append(e["line"])
         for sid, d in seen.items():
             if sid == root["id"]:
                 continue
             s = self.symbol_by_id(sid)
             if s:
-                levels[d].append({"qualified": s["qualified"], "path": s["path"], "line": s["start_line"]})
+                levels[d].append({"qualified": s["qualified"], "path": s["path"], "line": s["start_line"],
+                                  "calls_at": sorted(call_lines.get(sid, []))[:6]})
         return {"found": True, "root": self._symbol_dict(root), "depth": depth,
                 "affected_symbols": len(seen) - 1, "affected_files": len(files),
                 "levels": {str(k): v[:limit] for k, v in sorted(levels.items())},

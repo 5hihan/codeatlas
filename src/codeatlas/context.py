@@ -438,14 +438,16 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
             if "exact name" not in reasons[r[0]]:
                 reasons[r[0]].append("exact name")
     if exact & set(_CTOR_NAMES):
+        # "the Hono constructor" names Hono.constructor as surely as spelling it out: same boost as a named identifier
+        ctor_boost = max(EXACT_BOOST, NAMED_SHARE * max(scores.values(), default=0.0))
         for cls in exact - set(_CTOR_NAMES):
             for r in c.execute("SELECT s.id, f.path, p.name FROM symbols s JOIN symbols p ON p.id=s.parent_id "
                                "JOIN files f ON f.id=s.file_id WHERE lower(p.name)=? AND s.name IN (%s)" % ",".join("?" * len(_CTOR_NAMES)) +
                                (" AND (f.path=? OR substr(f.path,1,?)=?)" if scope else "") + " LIMIT 20",
                                (cls, *_CTOR_NAMES, *scope_args)):
-                scores[r[0]] += exact_boost * _path_factor(r[1])
+                scores[r[0]] += ctor_boost * _path_factor(r[1])
                 reasons[r[0]].append(f"constructor of {r[2]}")
-                structural_ids.add(r[0])
+                structural_ids.add(r[0]); named_ids.add(r[0])
     # A task may name a schema/config rather than a symbol. Resolve explicit consumers
     # from the persisted relationship index instead of guessing from matching names.
     from .relationships import relationships
@@ -503,21 +505,27 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     # reference table knows every call site and its enclosing symbol. Generic names (called from more than
     # CALLS_TERM_MAX_SITES places) and sites in tests, samples and tooling are ignored.
     best_lexical = max(scores.values(), default=0.0)
+    call_sites: dict[int, list[tuple[str, list[int]]]] = defaultdict(list)   # item -> [(term, call lines)]
     if best_lexical > 0:
         called: dict[int, list[str]] = defaultdict(list)
         for t in search_terms:
             if len(t) < 4:
                 continue
-            rows = c.execute("SELECT r.enclosing_id, f.path FROM refs r JOIN files f ON f.id=r.file_id "
+            rows = c.execute("SELECT r.enclosing_id, f.path, r.line FROM refs r JOIN files f ON f.id=r.file_id "
                              "WHERE lower(r.name)=? AND r.kind IN ('call', 'new') AND r.enclosing_id IS NOT NULL "
-                             "GROUP BY r.enclosing_id", (t,)).fetchall()
-            sites = [(eid, path) for eid, path in rows if _path_factor(path) == 1.0]   # tests call everything
-            if not sites or len(sites) > CALLS_TERM_MAX_SITES:
+                             "ORDER BY r.enclosing_id, r.line", (t,)).fetchall()
+            by_site: dict[int, tuple[str, list[int]]] = {}
+            for eid, path, line in rows:
+                if _path_factor(path) < 1.0:   # tests call everything
+                    continue
+                by_site.setdefault(eid, (path, []))[1].append(line)
+            if not by_site or len(by_site) > CALLS_TERM_MAX_SITES:
                 continue
-            for eid, path in sites:
+            for eid, (path, lines) in by_site.items():
                 if scope and not (path == scope or path.startswith(scope + "/")):
                     continue
                 called[eid].append(t)
+                call_sites[eid].append((t, lines[:4]))
         for eid, ts in called.items():
             scores[eid] += best_lexical * CALLS_TERM_SHARE * len(ts)
             reasons[eid].append("calls " + ", ".join(f"{t}()" for t in ts[:3]))
@@ -726,7 +734,19 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     result["explain_patterns"] = bool(hints) or bool(_EXPLAIN_Q.search(task))
     # a change wants to know who calls what it touches; callers of the strongest items save a references() round trip
     show_callers = bool(_CALLERS_Q.search(task))
-    caller_items = 0
+    # "which tests cover it": the test call sites of the strongest items, so no references() round trip is needed
+    show_tests = bool(_TESTS_Q.search(task))
+    caller_items = test_items = 0
+    # bodies go to the symbols the task is about: the ones it names and the route from them first, then by score
+    body_ids: set[int] = set()
+    if include_source:
+        order = [sid for sid in top if sid in named_ids or sid in path_ids] + [sid for sid in top if sid not in named_ids and sid not in path_ids]
+        for sid in order:
+            s0 = atlas.symbol_by_id(sid)
+            if s0 and s0["lines"] <= 160 and s0["kind"] in BODY_KINDS and sid not in bridge_ids:
+                body_ids.add(sid)
+                if len(body_ids) >= MAX_SOURCE_ITEMS:
+                    break
 
     # Reserve dependency evidence and tests before adding optional source bodies.
     selected = {sid: atlas.symbol_by_id(sid) for sid in top}
@@ -769,8 +789,7 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                 "expand": f"symbol_source(\"{s['qualified']}\", path=\"{s['path']}\")"}
         used += cost
         # source bodies for the strongest items while budget allows (cap 120 lines each); bridges stay signatures
-        if (include_source and len(items) < MAX_SOURCE_ITEMS and s["lines"] <= 160 and source_used < allocations["source"]
-                and sid not in bridge_ids and s["kind"] in BODY_KINDS):
+        if sid in body_ids and source_used < allocations["source"]:
             src = atlas.source(s["qualified"], s["path"], max_lines=MAX_SOURCE_LINES)
             if src.get("found"):
                 scost = estimate_tokens(src["text"])
@@ -790,6 +809,17 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
                     item["callers"] = line
                     used += ccost
                     caller_items += 1
+        if show_tests and test_items < MAX_CALLER_ITEMS and s["kind"] in ("function", "method", "class") and not is_test_path(s["path"]):
+            line = _tests_line(c, s)
+            if line:
+                tcost = estimate_tokens(line) + 1
+                if used + tcost <= allocations["symbols"]:
+                    item["tests"] = line
+                    used += tcost
+                    test_items += 1
+        if sid in call_sites:
+            item["call_sites"] = "calls " + ", ".join(f"{t}() :" + " :".join(map(str, ls)) for t, ls in call_sites[sid][:3])
+            used += estimate_tokens(item["call_sites"]) + 1
     result["items"] = items
     result["tokens_used"] = used + source_used
     result["symbols_considered"] = len(scores)
@@ -801,6 +831,25 @@ _EXPLAIN_Q = re.compile(r"\b(explain|idiom|idioms|pattern|patterns|construct|con
 _CALLERS_Q = re.compile(r"\b(who calls|what calls|callers?|call sites?|who uses|what uses|used by|what breaks|would break|"
                         r"depends? on|change|changes|changing|changed|modify|modifying|refactor|rename|remove|replace|"
                         r"signature|impact|affect|affects|affected)\b", re.I)
+
+
+_TESTS_Q = re.compile(r"\b(which tests?|what tests?|tests? (?:that )?(?:cover|exercise|hit|touch|check|verif)\w*|covered by|"
+                      r"tests? to run|test coverage|exercised by)\b", re.I)
+
+
+def _tests_line(c, s: dict) -> str:
+    """``tests: tests/test_a.py:12, :40; tests/test_b.py:7 (+n files)`` for one item, from references in test files."""
+    rows = c.execute("SELECT f.path, r.line FROM refs r JOIN files f ON f.id=r.file_id WHERE r.name=? ORDER BY f.path, r.line",
+                     (s["name"],)).fetchall()
+    per: dict[str, set[int]] = {}
+    for path, line in rows:
+        if is_test_path(path):
+            per.setdefault(path, set()).add(line)
+    if not per:
+        return ""
+    files = sorted(((p, sorted(ls)) for p, ls in per.items()), key=lambda kv: -len(kv[1]))
+    parts = [f"{p}:{', :'.join(map(str, ls[:3]))}" + (f" (+{len(ls) - 3})" if len(ls) > 3 else "") for p, ls in files[:3]]
+    return "tests: " + "; ".join(parts) + (f" (+{len(files) - 3} files)" if len(files) > 3 else "")
 
 
 def _callers_line(atlas: Atlas, sid: int, s: dict) -> str:
@@ -934,6 +983,10 @@ def render(r: dict) -> str:
                 block += f"\n  doc: {it['doc']}"
             if it.get("callers"):
                 block += f"\n  {it['callers']}"
+            if it.get("tests"):
+                block += f"\n  {it['tests']}"
+            if it.get("call_sites"):
+                block += f"\n  {it['call_sites']}"
             add(block)
     if r.get("paths") or r.get("unreached"):
         from .connect import format_route_tree, _node_text, PROXIMITY_MAX_HOPS
