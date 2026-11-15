@@ -352,7 +352,10 @@ in five-question conversations it processed 357,702 tokens a session against the
 the previous build +18%) at $0.340 (-8%); in single-question sessions it cost $0.028 (-19%, blocked p < 0.0001)
 against the previous build's $0.026 (-25%) with 2.4 calls a question against 2.1: the truncated bodies were fetched
 again. The cap was dropped; the title stripping and the memory of shown bodies, which change no answer's first
-turn, stay. The honest position on total tokens: this architecture does not reduce them. Per question they are
+turn, stay. A last build told the model inside each answer which bodies and caller lists were complete, since the
+conversation logs showed it re-fetching both: over 70 more sessions it made 2.4 calls a question instead of 2.1,
+reaching for Grep and Read where it had used `symbol_source`, at -23% cost and the same flat total; reverted. The
+honest position on total tokens: this architecture does not reduce them. Per question they are
 flat; across a long conversation they rise by about a tenth, because the index's answers are richer than a grep's
 and stay in context, while the tokens they save are the generated and freshly read ones that carry the cost. Spend
 on every real-session measurement in this section: about $43 of API calls.
