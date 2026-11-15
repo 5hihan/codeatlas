@@ -173,6 +173,12 @@ def build_server(app: App):
                 app.fresh()
                 try:
                     return fn(*a, **kw)
+                except Exception as e:
+                    # a bug in one tool must not strand the model with an opaque "Error executing tool": say what
+                    # failed and what still works (measured: an opaque error sent it back to Grep and Read)
+                    logging.getLogger(__name__).exception("tool %s failed", fn.__name__)
+                    return (f"{fn.__name__} failed ({type(e).__name__}: {str(e)[:200]}). The index is still available: "
+                            f"retry without optional arguments, or use find_symbols / symbol_source / references.")
                 finally:
                     app.log_tool(fn.__name__, kw, (time.time() - t0) * 1000)
         return wrapper

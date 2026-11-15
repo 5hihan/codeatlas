@@ -302,3 +302,21 @@ def test_hook_answer_serves_identifier_grep_through_bash(repo: Path, capsys, mon
                                                       "cwd": str(repo)}, capsys, monkeypatch) == {}
     assert _run_hook(["answer", "--prefix", prefix], {"tool_name": "Bash", "tool_input": {"command": "pytest -q"},
                                                       "cwd": str(repo)}, capsys, monkeypatch) == {}
+
+
+def test_tool_failure_is_a_readable_answer(tmp_path_factory, monkeypatch):
+    """A tool that raises answers with what failed and what still works, instead of an opaque MCP error."""
+    import asyncio
+    from codeatlas import server, context
+    repo = tmp_path_factory.mktemp("fail_repo")
+    (repo / "app.py").write_text("def f():\n    return 1\n")
+    app = server.App(repo, watch=False, dashboard=False)
+    mcp = server.build_server(app)
+    def boom(*a, **kw):
+        raise RuntimeError("binding count")
+    monkeypatch.setattr(context, "task_context", boom)
+    async def go():
+        r = await mcp.call_tool("task_context", {"task": "where is f", "scope": "app"})
+        return r[0].text if isinstance(r, list) else str(r)
+    text = asyncio.run(go())
+    assert "task_context failed (RuntimeError: binding count)" in text and "find_symbols" in text
