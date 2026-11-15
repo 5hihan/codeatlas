@@ -468,7 +468,8 @@ def task_context(ix: Index, atlas: Atlas, task: str, scope: Optional[str] = None
     # ---- 2. graph expansion --------------------------------------------------------
     lexical_ids = set(scores)
     seeds = sorted(scores, key=lambda s: -scores[s])[:10]
-    flow_question = include_source and bool(_FLOW_Q.search(task))
+    # the route is followed for "how does X reach Y" questions whether or not bodies were requested
+    flow_question = wants_source(task) and bool(_FLOW_Q.search(task))
 
     def constructor_of(sym: dict) -> Optional[dict]:
         """Constructing a class runs its constructor: the work of `Foo(...)` is in Foo.__init__ / constructor."""

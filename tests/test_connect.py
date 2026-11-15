@@ -319,10 +319,13 @@ def test_flow_questions_follow_closures_and_constructors(tmp_path: Path):
     ix = Index(tmp_path)
     ix.update()
     atlas = Atlas(ix)
-    flow = context.task_context(ix, atlas, "how does a route get from Router registration to the handler being dispatched?")
+    q = "how does a route get from Router registration to the handler being dispatched?"
+    assert context.task_context(ix, atlas, q)["include_source"] is True
+    # without bodies, methods are not folded into their class's included body, so every route node is listed
+    flow = context.task_context(ix, atlas, q, include_source=False)
     names = [i["qualified"] for i in flow["items"]]
-    assert flow["include_source"] is True
     assert {"Router.add_route", "Route", "session", "dispatch"} <= set(names), names
+    assert any("called by" in i["why"] or "on the path" in i["why"] for i in flow["items"] if i["qualified"] in ("session", "dispatch"))
     where = context.task_context(ix, atlas, "where is the route registered on the Router")
     assert where["include_source"] is False
     assert "session" not in [i["qualified"] for i in where["items"]], "a location question does not follow the route"
